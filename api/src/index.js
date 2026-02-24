@@ -300,20 +300,45 @@ process.on('SIGTERM', () => {
 });
 
 // --- Start Server ---
-server.listen(config.port, '0.0.0.0', () => {
-  console.log(`
+async function startServer() {
+  // Run database migrations
+  console.log('[Server] Running database migrations...');
+  const db = require('./db');
+  const migrationResult = await db.runMigrations();
+  if (migrationResult.applied > 0) {
+    console.log(`[Server] Applied ${migrationResult.applied} migration(s)`);
+  }
+  
+  // Check database connection
+  const dbHealth = await db.healthCheck();
+  if (!dbHealth.ok) {
+    console.error('[Server] Database connection failed:', dbHealth.error);
+    process.exit(1);
+  }
+  console.log(`[Server] Database connected (${dbHealth.responseTime}ms)`);
+  
+  // Start HTTP server
+  server.listen(config.port, '0.0.0.0', () => {
+    console.log(`
   ╔══════════════════════════════════════════════════════════╗
   ║                                                          ║
-  ║   🔨 MAX — AI Field Assistant v1.1.0                    ║
+  ║   🔨 MAX — AI Field Assistant v1.2.0                    ║
   ║   CTL Plumbing LLC                                       ║
   ║                                                          ║
   ║   HTTP:  http://localhost:${config.port}                        ║
   ║   WS:    ws://localhost:${config.port}/ws                       ║
+  ║   Web:   http://localhost:${config.port}/ (dashboard)             ║
   ║                                                          ║
   ║   Tailscale: http://${config.tailscaleIp}:${config.externalPort}            ║
   ║                                                          ║
   ╚══════════════════════════════════════════════════════════╝
-  `);
+    `);
+  });
+}
+
+startServer().catch(err => {
+  console.error('[Server] Failed to start:', err);
+  process.exit(1);
 });
 
 module.exports = { app, server, wss, broadcast };
