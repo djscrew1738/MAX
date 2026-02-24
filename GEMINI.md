@@ -40,7 +40,6 @@ The project is structured as a mono-repo with two primary components:
 
 - `api/`: Primary Node.js backend source code.
 - `app/`: Android application source code (Kotlin).
-- `max/`: Deployment-ready copy of the server component.
 - `docker-compose.yml`: Root configuration for launching the backend services.
 - `AGENTS.md`: Detailed technical guidance for AI agents (Reference this for logic details).
 - `README.md`: High-level overview and quick start.
@@ -80,6 +79,7 @@ docker compose up -d
     - Use `async/await` for all asynchronous logic.
     - Prefix logs: `[Service] Message`.
     - Business logic belongs in `/services`, route handling in `/routes`.
+    - **Database Migrations:** Schema changes are managed in `api/src/db/migrations/` and applied automatically on server startup.
 - **Android:**
     - UI is built entirely with Jetpack Compose.
     - Use Kotlin Coroutines and StateFlow for reactive state.
@@ -91,7 +91,7 @@ docker compose up -d
 ## Key Files for AI Guidance
 
 - `api/src/services/pipeline.js`: Central logic for audio processing.
-- `api/src/db/schema.sql`: Database definition.
+- `api/src/db/migrations/`: Database schema and migration history.
 - `api/src/prompts/construction-summary.md`: The system prompt used for LLM summarization.
 - `app/src/main/java/com/ctlplumbing/max/data/api/MaxApiClient.kt`: API interface definition.
 
