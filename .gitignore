@@ -8,3 +8,8 @@ data/*
 *.wav
 *.mp3
 *.mp4
+
+# worktrees
+.worktrees/
+worktrees/
+
