@@ -1,37 +1,94 @@
 const { Pool } = require('pg');
 const config = require('../config');
+const { logger } = require('../utils/logger');
 
-const pool = new Pool({
-  connectionString: config.db.connectionString,
-  max: config.db.maxConnections,
-  idleTimeoutMillis: config.db.idleTimeoutMillis,
-  connectionTimeoutMillis: 10000,
-});
+/**
+ * Database connection with retry logic and health checking
+ */
 
-pool.on('connect', () => {
-  // Silently connect
-});
+let pool;
 
-pool.on('error', (err) => {
-  console.error('[DB] Unexpected error on idle client:', err);
-});
+/**
+ * Create database pool
+ */
+function createPool() {
+  pool = new Pool({
+    connectionString: config.db.connectionString,
+    max: config.db.maxConnections,
+    connectionTimeoutMillis: config.db.connectionTimeout,
+  });
 
-// Connection health check
-async function healthCheck() {
-  try {
-    const start = Date.now();
-    await pool.query('SELECT 1');
-    return { ok: true, responseTime: Date.now() - start };
-  } catch (err) {
-    return { ok: false, error: err.message };
+  pool.on('error', (err) => {
+    logger.error({ err }, '[DB] Unexpected error on idle client');
+  });
+
+  pool.on('connect', () => {
+    logger.debug('[DB] New client connected');
+  });
+
+  return pool;
+}
+
+/**
+ * Connect to database with exponential backoff retry
+ */
+async function connectWithRetry(retries = config.db.retryAttempts, delay = config.db.retryDelay) {
+  const maxRetries = retries;
+  
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      if (!pool) {
+        createPool();
+      }
+      
+      // Test connection
+      const client = await pool.connect();
+      await client.query('SELECT 1');
+      client.release();
+      
+      logger.info(`[DB] Connected successfully (attempt ${i + 1}/${maxRetries})`);
+      return pool;
+    } catch (err) {
+      const isLastAttempt = i === maxRetries - 1;
+      const nextDelay = delay * Math.pow(2, i);
+      
+      logger.warn({
+        attempt: i + 1,
+        maxRetries,
+        nextDelay,
+        error: err.message,
+        isLastAttempt,
+      }, '[DB] Connection attempt failed');
+      
+      if (isLastAttempt) {
+        logger.error({ err }, '[DB] Max retries exceeded, giving up');
+        throw err;
+      }
+      
+      logger.info(`[DB] Retrying in ${nextDelay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, nextDelay));
+    }
   }
 }
 
-// Simple query helper
-const query = (text, params) => pool.query(text, params);
+/**
+ * Simple query helper
+ */
+function query(text, params) {
+  if (!pool) {
+    throw new Error('Database not connected');
+  }
+  return pool.query(text, params);
+}
 
-// Transaction helper
-const transaction = async (callback) => {
+/**
+ * Transaction helper
+ */
+async function transaction(callback) {
+  if (!pool) {
+    throw new Error('Database not connected');
+  }
+  
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -44,34 +101,42 @@ const transaction = async (callback) => {
   } finally {
     client.release();
   }
-};
+}
 
-// Run migrations on startup
-async function runMigrations() {
+/**
+ * Health check
+ */
+async function healthCheck() {
+  if (!pool) {
+    return false;
+  }
+  
   try {
-    const { migrate } = require('./migrate');
-    const result = await migrate();
-    return result;
+    const start = Date.now();
+    await pool.query('SELECT 1');
+    const latency = Date.now() - start;
+    return { healthy: true, latency };
   } catch (err) {
-    console.error('[DB] Migration error:', err.message);
-    return { applied: 0, failed: 0, error: err.message };
+    logger.error({ err }, '[DB] Health check failed');
+    return { healthy: false, error: err.message };
   }
 }
 
-// Get pool stats
-function getStats() {
-  return {
-    totalCount: pool.totalCount,
-    idleCount: pool.idleCount,
-    waitingCount: pool.waitingCount,
-  };
+/**
+ * Close pool gracefully
+ */
+async function close() {
+  if (pool) {
+    await pool.end();
+    logger.info('[DB] Pool closed');
+  }
 }
 
-module.exports = { 
-  pool, 
-  query, 
+module.exports = {
+  connectWithRetry,
+  query,
   transaction,
   healthCheck,
-  runMigrations,
-  getStats,
+  close,
+  get pool() { return pool; },
 };

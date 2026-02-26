@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const config = require('../config');
 const db = require('../db');
+const { logger } = require('../utils/logger');
 
 const INTEL_PROMPT = `You are Max, an AI field assistant for CTL Plumbing LLC. You are generating a rolling intelligence brief for a specific job/lot.
 
@@ -23,19 +24,20 @@ Format as clean readable text, NOT JSON.`;
  * Generate or update the rolling intelligence brief for a job
  */
 async function updateJobIntelligence(jobId) {
-  console.log(`[Intel] Updating intelligence for job #${jobId}`);
+  const intelLogger = logger.child({ jobId });
+  intelLogger.info('[Intel] Updating intelligence');
 
-  // Get all session summaries
+  // Get all session summaries (excluding soft deleted)
   const { rows: sessions } = await db.query(
     `SELECT s.id, s.summary, s.summary_json, s.phase, s.recorded_at, s.discrepancies, s.duration_secs
      FROM sessions s
-     WHERE s.job_id = $1 AND s.status = 'complete'
+     WHERE s.job_id = $1 AND s.status = 'complete' AND s.deleted_at IS NULL
      ORDER BY s.recorded_at ASC`,
     [jobId]
   );
 
   if (sessions.length === 0) {
-    console.log('[Intel] No completed sessions, skipping');
+    intelLogger.info('[Intel] No completed sessions, skipping');
     return null;
   }
 
@@ -43,7 +45,7 @@ async function updateJobIntelligence(jobId) {
   const { rows: planAttachments } = await db.query(
     `SELECT a.file_name, a.analysis, a.analysis_text
      FROM attachments a
-     WHERE a.job_id = $1 AND a.analysis IS NOT NULL`,
+     WHERE a.job_id = $1 AND a.analysis IS NOT NULL AND a.deleted_at IS NULL`,
     [jobId]
   );
 
@@ -51,15 +53,20 @@ async function updateJobIntelligence(jobId) {
   const { rows: openActions } = await db.query(
     `SELECT ai.description, ai.priority, ai.due_date, ai.created_at
      FROM action_items ai
-     WHERE ai.job_id = $1 AND ai.completed = FALSE
+     WHERE ai.job_id = $1 AND ai.completed = FALSE AND ai.deleted_at IS NULL
      ORDER BY ai.priority DESC, ai.created_at ASC`,
     [jobId]
   );
 
   // Get job metadata
   const { rows: [job] } = await db.query(
-    'SELECT * FROM jobs WHERE id = $1', [jobId]
+    'SELECT * FROM jobs WHERE id = $1 AND deleted_at IS NULL', [jobId]
   );
+
+  if (!job) {
+    intelLogger.warn('[Intel] Job not found or deleted');
+    return null;
+  }
 
   // Build the context
   let context = `JOB: ${job.builder_name || 'Unknown'} — ${job.subdivision || ''} ${job.lot_number ? 'Lot ' + job.lot_number : ''}\n`;
@@ -104,7 +111,10 @@ async function updateJobIntelligence(jobId) {
     context += '\n';
   }
 
-  // Generate intelligence brief
+  // Generate intelligence brief with timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.ollama.timeout);
+
   try {
     const response = await fetch(`${config.ollama.url}/api/chat`, {
       method: 'POST',
@@ -118,7 +128,10 @@ async function updateJobIntelligence(jobId) {
         stream: false,
         options: { temperature: 0.3, num_predict: 3000 },
       }),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) throw new Error(`Ollama failed: ${response.status}`);
 
@@ -131,11 +144,16 @@ async function updateJobIntelligence(jobId) {
       [intel, jobId]
     );
 
-    console.log(`[Intel] Generated ${intel.length} char brief for job #${jobId}`);
+    intelLogger.info({ chars: intel.length }, '[Intel] Generated brief');
     return intel;
 
   } catch (err) {
-    console.error(`[Intel] Failed to generate intelligence: ${err.message}`);
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      intelLogger.error('[Intel] Request timed out');
+    } else {
+      intelLogger.error({ err: err.message }, '[Intel] Failed to generate intelligence');
+    }
     
     // Fallback: just concatenate summaries
     const fallback = sessions.map(s => s.summary).filter(Boolean).join('\n\n---\n\n');
@@ -152,7 +170,7 @@ async function updateJobIntelligence(jobId) {
  */
 async function getJobIntelligence(jobId, forceRefresh = false) {
   const { rows: [job] } = await db.query(
-    'SELECT job_intel, updated_at FROM jobs WHERE id = $1', [jobId]
+    'SELECT job_intel, updated_at FROM jobs WHERE id = $1 AND deleted_at IS NULL', [jobId]
   );
 
   if (!job) return null;
@@ -160,7 +178,8 @@ async function getJobIntelligence(jobId, forceRefresh = false) {
   // Check if we need to refresh (if latest session is newer than intel)
   if (!forceRefresh && job.job_intel) {
     const { rows: [latest] } = await db.query(
-      `SELECT MAX(processed_at) as latest FROM sessions WHERE job_id = $1 AND status = 'complete'`,
+      `SELECT MAX(processed_at) as latest FROM sessions 
+       WHERE job_id = $1 AND status = 'complete' AND deleted_at IS NULL`,
       [jobId]
     );
     

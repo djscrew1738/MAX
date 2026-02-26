@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const os = require('os');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
@@ -54,16 +55,16 @@ function recordProcessing(success, duration) {
  */
 router.get('/', async (req, res) => {
   try {
-    // Get database stats
+    // Get database stats (excluding soft deleted)
     const { rows: [dbStats] } = await db.query(`
       SELECT 
-        (SELECT COUNT(*) FROM sessions) as total_sessions,
-        (SELECT COUNT(*) FROM sessions WHERE status = 'complete') as completed_sessions,
-        (SELECT COUNT(*) FROM sessions WHERE status = 'error') as error_sessions,
-        (SELECT COUNT(*) FROM sessions WHERE status IN ('transcribing', 'summarizing')) as processing_sessions,
-        (SELECT COUNT(*) FROM jobs) as total_jobs,
-        (SELECT COUNT(*) FROM chunks) as total_chunks,
-        (SELECT COUNT(*) FROM action_items WHERE completed = FALSE) as open_actions,
+        (SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL) as total_sessions,
+        (SELECT COUNT(*) FROM sessions WHERE status = 'complete' AND deleted_at IS NULL) as completed_sessions,
+        (SELECT COUNT(*) FROM sessions WHERE status = 'error' AND deleted_at IS NULL) as error_sessions,
+        (SELECT COUNT(*) FROM sessions WHERE status IN ('transcribing', 'summarizing') AND deleted_at IS NULL) as processing_sessions,
+        (SELECT COUNT(*) FROM jobs WHERE deleted_at IS NULL) as total_jobs,
+        (SELECT COUNT(*) FROM chunks WHERE deleted_at IS NULL) as total_chunks,
+        (SELECT COUNT(*) FROM action_items WHERE completed = FALSE AND deleted_at IS NULL) as open_actions,
         (SELECT COUNT(*) FROM notifications WHERE read = FALSE) as unread_notifications
     `);
 
@@ -151,6 +152,7 @@ router.get('/', async (req, res) => {
     res.set('Content-Type', 'text/plain');
     res.send(output.join('\n'));
   } catch (err) {
+    logger.error({ err }, '[Metrics] Error generating metrics');
     res.status(500).send(`# Error: ${err.message}`);
   }
 });
@@ -162,17 +164,17 @@ router.get('/dashboard', async (req, res) => {
   try {
     const { rows: [stats] } = await db.query(`
       SELECT 
-        (SELECT COUNT(*) FROM sessions) as total_sessions,
-        (SELECT COUNT(*) FROM sessions WHERE status = 'complete') as completed_sessions,
-        (SELECT COUNT(*) FROM sessions WHERE status = 'error') as error_sessions,
-        (SELECT COUNT(*) FROM sessions WHERE status IN ('transcribing', 'summarizing')) as processing_sessions,
-        (SELECT COUNT(*) FROM jobs) as total_jobs,
-        (SELECT COUNT(*) FROM chunks) as total_chunks,
-        (SELECT COUNT(*) FROM action_items WHERE completed = FALSE) as open_actions,
-        (SELECT COUNT(*) FROM attachments) as total_attachments,
+        (SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL) as total_sessions,
+        (SELECT COUNT(*) FROM sessions WHERE status = 'complete' AND deleted_at IS NULL) as completed_sessions,
+        (SELECT COUNT(*) FROM sessions WHERE status = 'error' AND deleted_at IS NULL) as error_sessions,
+        (SELECT COUNT(*) FROM sessions WHERE status IN ('transcribing', 'summarizing') AND deleted_at IS NULL) as processing_sessions,
+        (SELECT COUNT(*) FROM jobs WHERE deleted_at IS NULL) as total_jobs,
+        (SELECT COUNT(*) FROM chunks WHERE deleted_at IS NULL) as total_chunks,
+        (SELECT COUNT(*) FROM action_items WHERE completed = FALSE AND deleted_at IS NULL) as open_actions,
+        (SELECT COUNT(*) FROM attachments WHERE deleted_at IS NULL) as total_attachments,
         (SELECT COUNT(*) FROM notifications WHERE read = FALSE) as unread_notifications,
-        (SELECT COUNT(*) FROM sessions WHERE created_at > NOW() - INTERVAL '24 hours') as sessions_24h,
-        (SELECT COUNT(*) FROM sessions WHERE created_at > NOW() - INTERVAL '7 days') as sessions_7d
+        (SELECT COUNT(*) FROM sessions WHERE created_at > NOW() - INTERVAL '24 hours' AND deleted_at IS NULL) as sessions_24h,
+        (SELECT COUNT(*) FROM sessions WHERE created_at > NOW() - INTERVAL '7 days' AND deleted_at IS NULL) as sessions_7d
     `);
 
     // Get recent processing times
@@ -184,7 +186,7 @@ router.get('/dashboard', async (req, res) => {
         processed_at,
         EXTRACT(EPOCH FROM (processed_at - created_at)) as processing_seconds
       FROM sessions 
-      WHERE processed_at IS NOT NULL
+      WHERE processed_at IS NOT NULL AND deleted_at IS NULL
       ORDER BY processed_at DESC 
       LIMIT 10
     `);
@@ -213,6 +215,7 @@ router.get('/dashboard', async (req, res) => {
       })),
     });
   } catch (err) {
+    logger.error({ err }, '[Metrics] Error generating dashboard');
     res.status(500).json({ error: err.message });
   }
 });

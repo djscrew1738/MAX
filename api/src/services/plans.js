@@ -4,6 +4,7 @@ const { execSync } = require('child_process');
 const fetch = require('node-fetch');
 const config = require('../config');
 const db = require('../db');
+const { logger } = require('../utils/logger');
 const { embedPlanAnalysis } = require('./embeddings');
 
 /**
@@ -11,10 +12,11 @@ const { embedPlanAnalysis } = require('./embeddings');
  * Extracts: fixture counts, room layouts, specs, measurements
  */
 async function analyzePlan(attachmentId) {
-  console.log(`[Plans] Analyzing attachment #${attachmentId}`);
+  const planLogger = logger.child({ attachmentId });
+  planLogger.info('[Plans] Analyzing attachment');
 
   const { rows: [attachment] } = await db.query(
-    'SELECT * FROM attachments WHERE id = $1', [attachmentId]
+    'SELECT * FROM attachments WHERE id = $1 AND deleted_at IS NULL', [attachmentId]
   );
   if (!attachment) throw new Error(`Attachment ${attachmentId} not found`);
 
@@ -49,7 +51,7 @@ async function analyzePlan(attachmentId) {
     );
   }
 
-  console.log(`[Plans] Analysis complete for attachment #${attachmentId}`);
+  planLogger.info('[Plans] Analysis complete');
   return analysisJson;
 }
 
@@ -66,19 +68,19 @@ async function extractPdfText(filePath) {
       const text = fs.readFileSync(outputPath, 'utf-8');
       fs.unlinkSync(outputPath); // cleanup
       if (text.trim().length > 50) {
-        console.log(`[Plans] Extracted ${text.length} chars via pdftotext`);
+        logger.info({ chars: text.length }, '[Plans] Extracted text via pdftotext');
         return text;
       }
     }
   } catch (err) {
-    console.log('[Plans] pdftotext failed, trying OCR approach');
+    logger.info('[Plans] pdftotext failed, trying OCR approach');
   }
 
   // Fallback: convert to images and OCR
   try {
     return await ocrPdf(filePath);
   } catch (err) {
-    console.error('[Plans] OCR also failed:', err.message);
+    logger.error({ err: err.message }, '[Plans] OCR also failed');
     return `[PDF could not be read: ${path.basename(filePath)}]`;
   }
 }
@@ -114,7 +116,7 @@ async function ocrPdf(filePath) {
       fullText += `\n--- Page ${page} ---\n${pageText}\n`;
     }
 
-    console.log(`[Plans] OCR extracted text from ${pages.length} pages`);
+    logger.info({ pages: pages.length }, '[Plans] OCR extracted text');
     return fullText;
   } finally {
     // Cleanup temp dir
@@ -132,8 +134,11 @@ async function describeImageWithOllama(imagePath) {
   const imageBase64 = fs.readFileSync(imagePath).toString('base64');
 
   // Try vision model first (llava), fall back to text description
-  const visionModel = process.env.OLLAMA_VISION_MODEL || 'llava';
+  const visionModel = config.ollama.visionModel;
   
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.ollama.timeout);
+
   try {
     const response = await fetch(`${config.ollama.url}/api/generate`, {
       method: 'POST',
@@ -152,14 +157,22 @@ Be thorough and specific. List everything you can identify.`,
         stream: false,
         options: { temperature: 0.1, num_predict: 2048 },
       }),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (response.ok) {
       const result = await response.json();
       return result.response || '';
     }
   } catch (err) {
-    console.log(`[Plans] Vision model (${visionModel}) not available: ${err.message}`);
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      logger.warn('[Plans] Vision model request timed out');
+    } else {
+      logger.info(`[Plans] Vision model (${visionModel}) not available: ${err.message}`);
+    }
   }
 
   return '[Image - vision model not available for analysis]';
@@ -219,6 +232,9 @@ Here is the extracted text:
 
 ${text.substring(0, 8000)}`;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.ollama.timeout);
+
   try {
     const response = await fetch(`${config.ollama.url}/api/chat`, {
       method: 'POST',
@@ -229,7 +245,10 @@ ${text.substring(0, 8000)}`;
         stream: false,
         options: { temperature: 0.2, num_predict: 2048 },
       }),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) throw new Error(`Ollama failed: ${response.status}`);
 
@@ -239,7 +258,12 @@ ${text.substring(0, 8000)}`;
     
     return JSON.parse(cleaned);
   } catch (err) {
-    console.error('[Plans] Ollama analysis failed:', err.message);
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      logger.error('[Plans] Ollama analysis timed out');
+      return { error: 'Analysis timed out', raw_text_length: text.length };
+    }
+    logger.error({ err: err.message }, '[Plans] Ollama analysis failed');
     return { error: err.message, raw_text_length: text.length };
   }
 }
@@ -283,6 +307,9 @@ Respond ONLY with valid JSON:
   "overall_recommendation": "one sentence summary of what needs attention"
 }`;
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.ollama.timeout);
+
   try {
     const response = await fetch(`${config.ollama.url}/api/chat`, {
       method: 'POST',
@@ -293,7 +320,10 @@ Respond ONLY with valid JSON:
         stream: false,
         options: { temperature: 0.2, num_predict: 2048 },
       }),
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) return null;
     
@@ -303,7 +333,12 @@ Respond ONLY with valid JSON:
     
     return JSON.parse(cleaned);
   } catch (err) {
-    console.error('[Plans] Cross-reference failed:', err.message);
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      logger.error('[Plans] Cross-reference timed out');
+    } else {
+      logger.error({ err: err.message }, '[Plans] Cross-reference failed');
+    }
     return null;
   }
 }

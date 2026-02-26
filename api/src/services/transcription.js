@@ -3,12 +3,14 @@ const path = require('path');
 const FormData = require('form-data');
 const fetch = require('node-fetch');
 const config = require('../config');
+const { logger } = require('../utils/logger');
 
 /**
  * Transcribe audio file using faster-whisper server (OpenAI-compatible API)
+ * Includes timeout handling
  */
 async function transcribe(audioFilePath) {
-  console.log(`[Whisper] Transcribing: ${audioFilePath}`);
+  logger.info({ file: audioFilePath }, '[Whisper] Transcribing');
   
   const form = new FormData();
   form.append('file', fs.createReadStream(audioFilePath));
@@ -16,35 +18,53 @@ async function transcribe(audioFilePath) {
   form.append('response_format', 'verbose_json');
   form.append('language', 'en');
 
-  const response = await fetch(`${config.whisper.url}/v1/audio/transcriptions`, {
-    method: 'POST',
-    body: form,
-    headers: form.getHeaders(),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.whisper.timeout);
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Whisper transcription failed (${response.status}): ${errText}`);
+  try {
+    const response = await fetch(`${config.whisper.url}/v1/audio/transcriptions`, {
+      method: 'POST',
+      body: form,
+      headers: form.getHeaders(),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Whisper transcription failed (${response.status}): ${errText}`);
+    }
+
+    const result = await response.json();
+    
+    // Extract segments with timestamps for chunking
+    const segments = (result.segments || []).map(seg => ({
+      text: seg.text.trim(),
+      start: seg.start,
+      end: seg.end,
+    }));
+
+    const fullText = result.text || segments.map(s => s.text).join(' ');
+    
+    logger.info({ 
+      segments: segments.length, 
+      chars: fullText.length,
+      duration: result.duration 
+    }, '[Whisper] Transcription complete');
+    
+    return {
+      text: fullText,
+      segments,
+      duration: result.duration || 0,
+    };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error(`Whisper transcription timed out after ${config.whisper.timeout}ms`);
+    }
+    throw err;
   }
-
-  const result = await response.json();
-  
-  // Extract segments with timestamps for chunking
-  const segments = (result.segments || []).map(seg => ({
-    text: seg.text.trim(),
-    start: seg.start,
-    end: seg.end,
-  }));
-
-  const fullText = result.text || segments.map(s => s.text).join(' ');
-  
-  console.log(`[Whisper] Transcribed ${segments.length} segments, ${fullText.length} chars`);
-  
-  return {
-    text: fullText,
-    segments,
-    duration: result.duration || 0,
-  };
 }
 
 /**

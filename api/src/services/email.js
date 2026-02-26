@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const config = require('../config');
+const { logger } = require('../utils/logger');
 
 let transporter = null;
 
@@ -23,7 +24,7 @@ function getTransporter() {
  */
 async function sendSummaryEmail(summaryText, summaryJson, session = {}) {
   if (!config.email.user || !config.email.to) {
-    console.log('[Email] Skipping — no email configured');
+    logger.info('[Email] Skipping — no email configured');
     return false;
   }
 
@@ -39,10 +40,10 @@ async function sendSummaryEmail(summaryText, summaryJson, session = {}) {
       html,
     });
 
-    console.log(`[Email] Summary sent: ${info.messageId}`);
+    logger.info({ messageId: info.messageId }, '[Email] Summary sent');
     return true;
   } catch (err) {
-    console.error(`[Email] Failed to send: ${err.message}`);
+    logger.error({ err }, '[Email] Failed to send');
     return false;
   }
 }

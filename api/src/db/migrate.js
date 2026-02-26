@@ -1,16 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('./index');
+const { logger } = require('../utils/logger');
 
 const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
+const MIGRATION_LOCK_ID = 12345; // Advisory lock ID for migrations
 
 /**
  * Get list of applied migrations from database
  */
-async function getAppliedMigrations() {
+async function getAppliedMigrations(client) {
   try {
     // Create migrations table if it doesn't exist
-    await db.query(`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         id SERIAL PRIMARY KEY,
         filename VARCHAR(255) NOT NULL UNIQUE,
@@ -18,10 +20,10 @@ async function getAppliedMigrations() {
       )
     `);
     
-    const { rows } = await db.query('SELECT filename FROM schema_migrations ORDER BY id');
+    const { rows } = await client.query('SELECT filename FROM schema_migrations ORDER BY id');
     return new Set(rows.map(r => r.filename));
   } catch (err) {
-    console.error('[Migrate] Error getting applied migrations:', err);
+    logger.error({ err }, '[Migrate] Error getting applied migrations');
     return new Set();
   }
 }
@@ -42,57 +44,100 @@ function getMigrationFiles() {
 /**
  * Apply a single migration
  */
-async function applyMigration(filename) {
+async function applyMigration(client, filename) {
   const filepath = path.join(MIGRATIONS_DIR, filename);
   const sql = fs.readFileSync(filepath, 'utf8');
   
-  console.log(`[Migrate] Applying: ${filename}`);
+  logger.info(`[Migrate] Applying: ${filename}`);
   
   try {
-    await db.query('BEGIN');
-    await db.query(sql);
-    await db.query(
+    await client.query(sql);
+    await client.query(
       'INSERT INTO schema_migrations (filename) VALUES ($1)',
       [filename]
     );
-    await db.query('COMMIT');
-    console.log(`[Migrate] ✅ Applied: ${filename}`);
+    logger.info(`[Migrate] ✅ Applied: ${filename}`);
     return true;
   } catch (err) {
-    await db.query('ROLLBACK');
-    console.error(`[Migrate] ❌ Failed: ${filename}`, err.message);
+    logger.error({ err, filename }, `[Migrate] ❌ Failed: ${filename}`);
     return false;
   }
 }
 
 /**
- * Run all pending migrations
+ * Acquire advisory lock for migrations
+ */
+async function acquireLock(client) {
+  const { rows } = await client.query(
+    'SELECT pg_try_advisory_lock($1) as acquired',
+    [MIGRATION_LOCK_ID]
+  );
+  return rows[0].acquired;
+}
+
+/**
+ * Release advisory lock
+ */
+async function releaseLock(client) {
+  await client.query('SELECT pg_advisory_unlock($1)', [MIGRATION_LOCK_ID]);
+}
+
+/**
+ * Run all pending migrations with distributed locking
  */
 async function migrate() {
-  console.log('[Migrate] Checking for pending migrations...');
+  logger.info('[Migrate] Checking for pending migrations...');
   
-  const applied = await getAppliedMigrations();
-  const files = getMigrationFiles();
-  const pending = files.filter(f => !applied.has(f));
+  const client = await db.pool.connect();
   
-  if (pending.length === 0) {
-    console.log('[Migrate] No pending migrations');
-    return { applied: 0, failed: 0 };
+  try {
+    // Try to acquire advisory lock
+    const lockAcquired = await acquireLock(client);
+    
+    if (!lockAcquired) {
+      logger.warn('[Migrate] Another migration is in progress, waiting...');
+      // Wait and retry a few times
+      for (let i = 0; i < 5; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        if (await acquireLock(client)) {
+          break;
+        }
+      }
+      if (!await acquireLock(client)) {
+        throw new Error('Could not acquire migration lock after retries');
+      }
+    }
+    
+    logger.info('[Migrate] Lock acquired');
+    
+    const applied = await getAppliedMigrations(client);
+    const files = getMigrationFiles();
+    const pending = files.filter(f => !applied.has(f));
+    
+    if (pending.length === 0) {
+      logger.info('[Migrate] No pending migrations');
+      return { applied: 0, failed: 0 };
+    }
+    
+    logger.info(`[Migrate] Found ${pending.length} pending migration(s)`);
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    for (const file of pending) {
+      const success = await applyMigration(client, file);
+      if (success) successCount++;
+      else failCount++;
+    }
+    
+    logger.info(`[Migrate] Complete: ${successCount} applied, ${failCount} failed`);
+    return { applied: successCount, failed: failCount };
+    
+  } finally {
+    await releaseLock(client);
+    client.release();
+    logger.info('[Migrate] Lock released');
   }
-  
-  console.log(`[Migrate] Found ${pending.length} pending migration(s)`);
-  
-  let successCount = 0;
-  let failCount = 0;
-  
-  for (const file of pending) {
-    const success = await applyMigration(file);
-    if (success) successCount++;
-    else failCount++;
-  }
-  
-  console.log(`[Migrate] Complete: ${successCount} applied, ${failCount} failed`);
-  return { applied: successCount, failed: failCount };
 }
 
 /**
@@ -115,7 +160,7 @@ function createMigration(name) {
 `;
   
   fs.writeFileSync(filepath, template);
-  console.log(`[Migrate] Created: ${filepath}`);
+  logger.info(`[Migrate] Created: ${filepath}`);
   return filepath;
 }
 
@@ -123,18 +168,23 @@ function createMigration(name) {
  * Get migration status
  */
 async function status() {
-  const applied = await getAppliedMigrations();
-  const files = getMigrationFiles();
-  
-  return {
-    total: files.length,
-    applied: applied.size,
-    pending: files.filter(f => !applied.has(f)),
-    migrations: files.map(f => ({
-      filename: f,
-      status: applied.has(f) ? 'applied' : 'pending'
-    }))
-  };
+  const client = await db.pool.connect();
+  try {
+    const applied = await getAppliedMigrations(client);
+    const files = getMigrationFiles();
+    
+    return {
+      total: files.length,
+      applied: applied.size,
+      pending: files.filter(f => !applied.has(f)),
+      migrations: files.map(f => ({
+        filename: f,
+        status: applied.has(f) ? 'applied' : 'pending'
+      }))
+    };
+  } finally {
+    client.release();
+  }
 }
 
 // CLI support
@@ -142,6 +192,9 @@ if (require.main === module) {
   const command = process.argv[2];
   
   (async () => {
+    // Initialize DB connection
+    await db.connectWithRetry();
+    
     switch (command) {
       case 'up':
         await migrate();
@@ -169,9 +222,11 @@ if (require.main === module) {
       default:
         console.log('Usage: node migrate.js [up|status|create <name>]');
     }
+    
+    await db.close();
     process.exit(0);
   })().catch(err => {
-    console.error(err);
+    logger.error({ err }, 'Migration CLI error');
     process.exit(1);
   });
 }

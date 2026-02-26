@@ -2,6 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
 const config = require('../config');
+const { logger } = require('../utils/logger');
+const { sanitizeForLLM } = require('../middlewares/security');
+const { validateSummary, validateDiscrepancies } = require('../utils/schemas');
 
 // Load the construction summary prompt
 const SUMMARY_PROMPT = fs.readFileSync(
@@ -11,53 +14,86 @@ const SUMMARY_PROMPT = fs.readFileSync(
 
 /**
  * Generate a structured summary from a transcript using Ollama
+ * Includes input sanitization and output validation
  */
 async function summarizeTranscript(transcript, planAnalysis = null) {
-  console.log('[Summarizer] Generating summary...');
+  logger.info('[Summarizer] Generating summary...');
 
-  let userPrompt = `Here is the job walk transcript:\n\n${transcript}`;
+  // Sanitize transcript to prevent prompt injection
+  const sanitizedTranscript = sanitizeForLLM(transcript);
+  
+  if (sanitizedTranscript.length < transcript.length) {
+    logger.warn('[Summarizer] Transcript contained potential injection attempts - sanitized');
+  }
+
+  let userPrompt = `Here is the job walk transcript:\n\n${sanitizedTranscript}`;
 
   if (planAnalysis) {
-    userPrompt += `\n\n---\n\nPlan/Blueprint analysis data is also available for this session:\n${JSON.stringify(planAnalysis, null, 2)}\n\nCross-reference the conversation with the plan data. Note any discrepancies between what was discussed and what the plans show.`;
+    // Sanitize plan analysis as well
+    const sanitizedPlan = JSON.parse(sanitizeForLLM(JSON.stringify(planAnalysis)));
+    userPrompt += `\n\n---\n\nPlan/Blueprint analysis data is also available for this session:\n${JSON.stringify(sanitizedPlan, null, 2)}\n\nCross-reference the conversation with the plan data. Note any discrepancies between what was discussed and what the plans show.`;
   }
 
-  const response = await fetch(`${config.ollama.url}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.ollama.model,
-      messages: [
-        { role: 'system', content: SUMMARY_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-      stream: false,
-      options: {
-        temperature: 0.3,
-        num_predict: 2048,
-      },
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.ollama.timeout);
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Ollama summarization failed (${response.status}): ${errText}`);
-  }
-
-  const result = await response.json();
-  const content = result.message?.content || '';
-
-  // Parse JSON from response (handle possible markdown fences)
-  let summaryJson;
   try {
-    const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    summaryJson = JSON.parse(cleaned);
-  } catch (err) {
-    console.error('[Summarizer] Failed to parse JSON, storing raw text');
-    summaryJson = { raw_response: content, parse_error: true };
-  }
+    const response = await fetch(`${config.ollama.url}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.ollama.model,
+        messages: [
+          { role: 'system', content: SUMMARY_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        stream: false,
+        options: {
+          temperature: 0.3,
+          num_predict: 2048,
+        },
+      }),
+      signal: controller.signal,
+    });
 
-  console.log('[Summarizer] Summary generated');
-  return summaryJson;
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Ollama summarization failed (${response.status}): ${errText}`);
+    }
+
+    const result = await response.json();
+    const content = result.message?.content || '';
+
+    // Parse JSON from response (handle possible markdown fences)
+    let summaryJson;
+    try {
+      const cleaned = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      summaryJson = JSON.parse(cleaned);
+    } catch (err) {
+      logger.error('[Summarizer] Failed to parse JSON, storing raw text');
+      summaryJson = { raw_response: content, parse_error: true };
+    }
+
+    // Validate output against schema
+    const validated = validateSummary(summaryJson);
+    
+    if (validated.parse_error) {
+      logger.warn({ errors: validated.validation_errors }, '[Summarizer] Output validation failed');
+    } else {
+      logger.info('[Summarizer] Summary generated and validated');
+    }
+
+    return validated;
+    
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Ollama summarization timed out');
+    }
+    throw err;
+  }
 }
 
 /**
@@ -129,13 +165,16 @@ function formatSummaryText(json, session = {}) {
 async function generateDiscrepancies(transcript, planAnalysis) {
   if (!planAnalysis) return null;
 
+  const sanitizedTranscript = sanitizeForLLM(transcript);
+  const sanitizedPlan = JSON.parse(sanitizeForLLM(JSON.stringify(planAnalysis)));
+
   const prompt = `You are comparing a job walk conversation with the actual construction plans for a plumbing project.
 
 TRANSCRIPT:
-${transcript}
+${sanitizedTranscript}
 
 PLAN ANALYSIS:
-${JSON.stringify(planAnalysis, null, 2)}
+${JSON.stringify(sanitizedPlan, null, 2)}
 
 Identify any discrepancies between what was discussed in the conversation and what the plans show. Focus on:
 - Fixture count differences
@@ -157,25 +196,40 @@ Respond ONLY with valid JSON:
   "recommendation": "One sentence on what to verify"
 }`;
 
-  const response = await fetch(`${config.ollama.url}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.ollama.model,
-      messages: [{ role: 'user', content: prompt }],
-      stream: false,
-      options: { temperature: 0.2, num_predict: 1024 },
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), config.ollama.timeout);
 
-  if (!response.ok) return null;
-
-  const result = await response.json();
   try {
-    const cleaned = (result.message?.content || '')
-      .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    return JSON.parse(cleaned);
-  } catch {
+    const response = await fetch(`${config.ollama.url}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.ollama.model,
+        messages: [{ role: 'user', content: prompt }],
+        stream: false,
+        options: { temperature: 0.2, num_predict: 1024 },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) return null;
+
+    const result = await response.json();
+    try {
+      const cleaned = (result.message?.content || '')
+        .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+      return validateDiscrepancies(parsed);
+    } catch {
+      return null;
+    }
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      logger.warn('[Summarizer] Discrepancy check timed out');
+    }
     return null;
   }
 }

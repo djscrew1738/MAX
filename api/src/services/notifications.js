@@ -1,53 +1,66 @@
 const db = require('../db');
+const { logger } = require('../utils/logger');
 
 /**
- * Notification System
- * - Stores notifications for Android app polling
- * - Broadcasts via WebSocket for real-time updates
- * - Can be extended to use Firebase Cloud Messaging (FCM)
+ * Notification service with WebSocket broadcasting
+ * Stores notifications for polling and broadcasts to connected WebSocket clients
  */
 
+// WebSocket server reference (set from index.js)
+let wss = null;
+
 /**
- * Broadcast via WebSocket if available
+ * Set WebSocket server reference for broadcasting
  */
-function broadcast(message) {
-  try {
-    const { broadcast: wsBroadcast } = require('../index');
-    if (wsBroadcast) {
-      wsBroadcast(message);
-    }
-  } catch (e) {
-    // WebSocket not available, ignore
-  }
+function setWebSocketServer(server) {
+  wss = server;
 }
 
 /**
  * Create a notification
  */
 async function createNotification(type, title, body, data = {}) {
-  const { rows: [notification] } = await db.query(
-    `INSERT INTO notifications (type, title, body, data, read)
-     VALUES ($1, $2, $3, $4, FALSE)
-     RETURNING *`,
-    [type, title, body, JSON.stringify(data)]
-  );
+  try {
+    await db.query(
+      `INSERT INTO notifications (type, title, body, data, read)
+       VALUES ($1, $2, $3, $4, FALSE)`,
+      [type, title, body, JSON.stringify(data)]
+    );
+    logger.info({ type, title }, '[Notify] Created notification');
+    
+    // Broadcast to all connected WebSocket clients
+    broadcastNotification({
+      type: 'notification',
+      notification: { type, title, body, data, created_at: new Date().toISOString() },
+    });
+  } catch (err) {
+    logger.error({ err, type }, '[Notify] Failed to create notification');
+  }
+}
+
+/**
+ * Broadcast message to all connected WebSocket clients
+ * Optionally filter by subscribed jobs
+ */
+function broadcastNotification(message) {
+  if (!wss) return;
   
-  console.log(`[Notify] ${type}: ${title}`);
+  const messageStr = JSON.stringify(message);
   
-  // Broadcast real-time notification
-  broadcast({
-    type: 'notification',
-    notification: {
-      id: notification.id,
-      type,
-      title,
-      body,
-      data,
-      created_at: notification.created_at,
-    },
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) { // WebSocket.OPEN
+      // If client has subscribed to specific jobs, filter accordingly
+      if (client.subscribedJobs && client.subscribedJobs.length > 0) {
+        const jobId = message.notification?.data?.job_id || message.sessionId;
+        if (jobId && client.subscribedJobs.includes(jobId)) {
+          client.send(messageStr);
+        }
+      } else {
+        // No subscription filter, send to all
+        client.send(messageStr);
+      }
+    }
   });
-  
-  return notification;
 }
 
 /**
@@ -73,17 +86,11 @@ async function notifySessionComplete(sessionId, summaryJson) {
     flags: flagCount,
   });
   
-  // Also broadcast session completion
-  broadcast({
+  // Broadcast session complete event
+  broadcastNotification({
     type: 'session_complete',
     sessionId,
-    summary: {
-      builder_name: summaryJson.builder_name,
-      subdivision: summaryJson.subdivision,
-      lot_number: summaryJson.lot_number,
-      action_items: actionCount,
-      flags: flagCount,
-    },
+    summary: summaryJson,
   });
 }
 
@@ -104,15 +111,11 @@ async function notifyDiscrepancies(sessionId, discrepancies) {
     );
   }
   
-  // Broadcast discrepancy alert
-  broadcast({
+  // Broadcast discrepancies event
+  broadcastNotification({
     type: 'discrepancies',
     sessionId,
-    discrepancies: {
-      count: discrepancies.items.length,
-      highPriority: high.length,
-      items: discrepancies.items.slice(0, 5), // Limit to first 5
-    },
+    discrepancies,
   });
 }
 
@@ -127,34 +130,38 @@ async function notifyError(sessionId, error) {
     { session_id: sessionId }
   );
   
-  broadcast({
+  // Broadcast error event
+  broadcastNotification({
     type: 'error',
     sessionId,
-    error: error.substring(0, 200), // Limit error length
+    message: error,
   });
 }
 
 /**
  * Get unread notifications
  */
-async function getUnread(limit = 50) {
+async function getUnread() {
   const { rows } = await db.query(
-    `SELECT * FROM notifications WHERE read = FALSE ORDER BY created_at DESC LIMIT $1`,
-    [limit]
+    `SELECT * FROM notifications 
+     WHERE read = FALSE 
+     ORDER BY created_at DESC 
+     LIMIT 50`
   );
   return rows;
 }
 
 /**
- * Get all notifications with pagination
+ * Get notification counts
  */
-async function getAll(page = 1, limit = 50) {
-  const offset = (page - 1) * limit;
-  const { rows } = await db.query(
-    `SELECT * FROM notifications ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
-    [limit, offset]
-  );
-  return rows;
+async function getCounts() {
+  const { rows: [counts] } = await db.query(`
+    SELECT 
+      COUNT(*) FILTER (WHERE read = FALSE) as unread,
+      COUNT(*) as total
+    FROM notifications
+  `);
+  return counts;
 }
 
 /**
@@ -175,30 +182,15 @@ async function markAllRead() {
   await db.query(`UPDATE notifications SET read = TRUE WHERE read = FALSE`);
 }
 
-/**
- * Get notification count
- */
-async function getCounts() {
-  const { rows: [counts] } = await db.query(`
-    SELECT 
-      COUNT(*) as total,
-      COUNT(*) FILTER (WHERE read = FALSE) as unread,
-      COUNT(*) FILTER (WHERE type = 'session_complete') as sessions,
-      COUNT(*) FILTER (WHERE type = 'discrepancy') as discrepancies,
-      COUNT(*) FILTER (WHERE type = 'error') as errors
-    FROM notifications
-  `);
-  return counts;
-}
-
 module.exports = {
+  setWebSocketServer,
   createNotification,
+  broadcastNotification,
   notifySessionComplete,
   notifyDiscrepancies,
   notifyError,
   getUnread,
-  getAll,
+  getCounts,
   markRead,
   markAllRead,
-  getCounts,
 };

@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const config = require('../config');
+const { logger } = require('../utils/logger');
 
 let transporter = null;
 
@@ -122,10 +123,10 @@ async function sendDiscrepancyAlert(discrepancies, sessionInfo = {}) {
       text: `Discrepancies found for ${jobLabel}:\n\n${(discrepancies.items || []).map(d => `[${d.severity}] ${d.description}`).join('\n')}`,
       html,
     });
-    console.log('[Email] Discrepancy alert sent');
+    logger.info('[Email] Discrepancy alert sent');
     return true;
   } catch (err) {
-    console.error('[Email] Discrepancy alert failed:', err.message);
+    logger.error({ err }, '[Email] Discrepancy alert failed');
     return false;
   }
 }

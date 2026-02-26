@@ -2,8 +2,10 @@ const express = require('express');
 const fetch = require('node-fetch');
 const db = require('../db');
 const config = require('../config');
+const { logger } = require('../utils/logger');
+const { sanitizeForLLM } = require('../middlewares/security');
+const { validateChatInput } = require('../utils/schemas');
 const { searchChunks } = require('../services/embeddings');
-const asyncHandler = require('../middlewares/asyncHandler');
 
 const router = express.Router();
 
@@ -19,6 +21,138 @@ Key context about CTL Plumbing:
 Be concise and direct. You're talking to the owner who's probably on a job site — give quick, useful answers. Use specific details from the recordings when available.`;
 
 /**
+ * POST /api/chat
+ * RAG-powered chat with Max
+ * 
+ * Body:
+ *  - message: user's question
+ *  - job_id (optional): scope to a specific job
+ *  - history (optional): array of {role, content} for conversation context
+ */
+router.post('/', async (req, res) => {
+  const reqLogger = logger.child({ reqId: req.id });
+  
+  try {
+    // Validate input
+    const validated = validateChatInput(req.body);
+    if (validated.error) {
+      return res.status(400).json({ error: 'Invalid input', details: validated.error });
+    }
+    
+    const { message, job_id, history = [] } = validated;
+
+    reqLogger.info({ jobId: job_id, messageLength: message.length }, '[Chat] Query received');
+
+    // --- Step 1: Search for relevant context ---
+    const relevantChunks = await searchChunks(message, {
+      jobId: job_id || null,
+      limit: 8,
+    });
+
+    // Build context string from relevant chunks
+    let context = '';
+    if (relevantChunks.length > 0) {
+      context = '\n\nRELEVANT INFORMATION FROM RECORDINGS:\n\n';
+      for (const chunk of relevantChunks) {
+        const meta = [];
+        if (chunk.builder_name) meta.push(chunk.builder_name);
+        if (chunk.subdivision) meta.push(chunk.subdivision);
+        if (chunk.lot_number) meta.push(`Lot ${chunk.lot_number}`);
+        if (chunk.recorded_at) meta.push(new Date(chunk.recorded_at).toLocaleDateString());
+        
+        const header = meta.length > 0 ? `[${meta.join(' — ')}]` : '[Recording]';
+        context += `${header} (${chunk.chunk_type}):\n${chunk.content}\n\n`;
+      }
+    }
+
+    // --- Step 2: Also pull recent action items if relevant ---
+    const actionContext = await getActionItemContext(job_id, message);
+
+    // --- Step 3: Build messages for Ollama ---
+    const messages = [
+      { role: 'system', content: CHAT_SYSTEM_PROMPT },
+    ];
+
+    // Add conversation history (last 10 turns)
+    const recentHistory = history.slice(-10);
+    for (const msg of recentHistory) {
+      // Sanitize history to prevent injection
+      messages.push({ 
+        role: msg.role, 
+        content: sanitizeForLLM(msg.content).substring(0, 5000) 
+      });
+    }
+
+    // Add the current question with context
+    let userMessage = sanitizeForLLM(message);
+    if (context) userMessage += context;
+    if (actionContext) userMessage += actionContext;
+    messages.push({ role: 'user', content: userMessage });
+
+    // --- Step 4: Get response from Ollama with timeout ---
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.ollama.chatTimeout);
+
+    const response = await fetch(`${config.ollama.url}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.ollama.model,
+        messages,
+        stream: false,
+        options: {
+          temperature: 0.5,
+          num_predict: 1024,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Ollama chat failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    const reply = result.message?.content || 'Sorry, I couldn\'t generate a response.';
+
+    // --- Step 5: Save to chat history ---
+    await db.query(
+      `INSERT INTO chat_messages (role, content) VALUES ('user', $1)`,
+      [message]
+    );
+    await db.query(
+      `INSERT INTO chat_messages (role, content, context_used) VALUES ('assistant', $1, $2)`,
+      [reply, JSON.stringify(relevantChunks.map(c => ({ id: c.id, similarity: c.similarity })))]
+    );
+
+    reqLogger.info({ replyLength: reply.length }, '[Chat] Response sent');
+
+    res.json({
+      reply,
+      sources: relevantChunks.map(c => ({
+        session_id: c.session_id,
+        builder: c.builder_name,
+        subdivision: c.subdivision,
+        lot: c.lot_number,
+        date: c.recorded_at,
+        type: c.chunk_type,
+        similarity: parseFloat(c.similarity?.toFixed(3) || 0),
+      })),
+    });
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      reqLogger.warn('[Chat] Request timed out');
+      return res.status(504).json({ error: 'Chat request timed out' });
+    }
+    reqLogger.error({ err }, '[Chat] Error');
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * Get open action items as additional context for chat
  */
 async function getActionItemContext(jobId, question) {
@@ -30,7 +164,7 @@ async function getActionItemContext(jobId, question) {
   let sql = `SELECT ai.*, j.builder_name, j.subdivision, j.lot_number
              FROM action_items ai
              LEFT JOIN jobs j ON ai.job_id = j.id
-             WHERE ai.completed = FALSE`;
+             WHERE ai.completed = FALSE AND ai.deleted_at IS NULL`;
 
   if (jobId) {
     params.push(jobId);
@@ -49,110 +183,5 @@ async function getActionItemContext(jobId, question) {
   }
   return context;
 }
-
-/**
- * POST /api/chat
- * RAG-powered chat with Max
- */
-router.post('/', asyncHandler(async (req, res) => {
-  const { message, job_id, history = [] } = req.body;
-
-  if (!message) {
-    const error = new Error('No message provided');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  console.log(`[Chat] Query: "${message.substring(0, 80)}..."`);
-
-  // --- Step 1: Search for relevant context ---
-  const relevantChunks = await searchChunks(message, {
-    jobId: job_id ? parseInt(job_id) : null,
-    limit: 8,
-  });
-
-  // Build context string from relevant chunks
-  let context = '';
-  if (relevantChunks.length > 0) {
-    context = '\n\nRELEVANT INFORMATION FROM RECORDINGS:\n\n';
-    for (const chunk of relevantChunks) {
-      const meta = [];
-      if (chunk.builder_name) meta.push(chunk.builder_name);
-      if (chunk.subdivision) meta.push(chunk.subdivision);
-      if (chunk.lot_number) meta.push(`Lot ${chunk.lot_number}`);
-      if (chunk.recorded_at) meta.push(new Date(chunk.recorded_at).toLocaleDateString());
-      
-      const header = meta.length > 0 ? `[${meta.join(' — ')}]` : '[Recording]';
-      context += `${header} (${chunk.chunk_type}):\n${chunk.content}\n\n`;
-    }
-  }
-
-  // --- Step 2: Also pull recent action items if relevant ---
-  const actionContext = await getActionItemContext(job_id, message);
-
-  // --- Step 3: Build messages for Ollama ---
-  const messages = [
-    { role: 'system', content: CHAT_SYSTEM_PROMPT },
-  ];
-
-  // Add conversation history (last 10 turns)
-  const recentHistory = history.slice(-10);
-  for (const msg of recentHistory) {
-    messages.push({ role: msg.role, content: msg.content });
-  }
-
-  // Add the current question with context
-  let userMessage = message;
-  if (context) userMessage += context;
-  if (actionContext) userMessage += actionContext;
-  messages.push({ role: 'user', content: userMessage });
-
-  // --- Step 4: Get response from Ollama ---
-  const response = await fetch(`${config.ollama.url}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.ollama.model,
-      messages,
-      stream: false,
-      options: {
-        temperature: 0.5,
-        num_predict: 1024,
-      },
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Ollama chat failed: ${response.status}`);
-  }
-
-  const result = await response.json();
-  const reply = result.message?.content || "Sorry, I couldn't generate a response.";
-
-  // --- Step 5: Save to chat history ---
-  await db.query(
-    `INSERT INTO chat_messages (role, content) VALUES ('user', $1)`,
-    [message]
-  );
-  await db.query(
-    `INSERT INTO chat_messages (role, content, context_used) VALUES ('assistant', $1, $2)`,
-    [reply, JSON.stringify(relevantChunks.map(c => ({ id: c.id, similarity: c.similarity })))]
-  );
-
-  console.log(`[Chat] Response: ${reply.substring(0, 80)}...`);
-
-  res.json({
-    reply,
-    sources: relevantChunks.map(c => ({
-      session_id: c.session_id,
-      builder: c.builder_name,
-      subdivision: c.subdivision,
-      lot: c.lot_number,
-      date: c.recorded_at,
-      type: c.chunk_type,
-      similarity: parseFloat(c.similarity?.toFixed(3) || 0),
-    })),
-  });
-}));
 
 module.exports = router;

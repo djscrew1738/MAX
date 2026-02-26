@@ -1,4 +1,5 @@
 const db = require('../db');
+const { logger } = require('../utils/logger');
 const { transcribe, stripMaxCommands, parseCommands } = require('./transcription');
 const { summarizeTranscript, formatSummaryText, generateDiscrepancies } = require('./summarizer');
 const { embedSession, embedSummary } = require('./embeddings');
@@ -19,14 +20,16 @@ const { notifySessionComplete, notifyDiscrepancies, notifyError } = require('./n
  * 7. Email summary
  */
 async function processSession(sessionId) {
-  console.log(`\n${'='.repeat(50)}`);
-  console.log(`[Pipeline] Processing session ${sessionId}`);
-  console.log(`${'='.repeat(50)}\n`);
+  const sessionLogger = logger.child({ sessionId });
+  
+  sessionLogger.info('\n' + '='.repeat(50));
+  sessionLogger.info('[Pipeline] Processing session');
+  sessionLogger.info('='.repeat(50) + '\n');
 
   try {
     // Get session from DB
     const { rows: [session] } = await db.query(
-      'SELECT * FROM sessions WHERE id = $1', [sessionId]
+      'SELECT * FROM sessions WHERE id = $1 AND deleted_at IS NULL', [sessionId]
     );
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
@@ -38,7 +41,10 @@ async function processSession(sessionId) {
     const { cleaned: transcript, commands } = stripMaxCommands(rawTranscript);
     const commandMeta = parseCommands(commands);
     
-    console.log(`[Pipeline] Transcript: ${transcript.length} chars, ${commands.length} commands stripped`);
+    sessionLogger.info({ 
+      transcriptLength: transcript.length, 
+      commandsStripped: commands.length 
+    }, '[Pipeline] Transcript processed');
 
     // Update session with transcript and duration
     await db.query(
@@ -61,21 +67,21 @@ async function processSession(sessionId) {
       // First, analyze any new unprocessed attachments
       const { rows: newAttachments } = await db.query(
         `SELECT id FROM attachments 
-         WHERE (session_id = $1 OR job_id = $2) AND analysis IS NULL AND file_type = 'pdf'`,
+         WHERE (session_id = $1 OR job_id = $2) AND analysis IS NULL AND file_type = 'pdf' AND deleted_at IS NULL`,
         [sessionId, jobId]
       );
       for (const att of newAttachments) {
         try {
           await analyzePlan(att.id);
         } catch (err) {
-          console.error(`[Pipeline] Plan analysis failed for attachment ${att.id}:`, err.message);
+          sessionLogger.error({ attachmentId: att.id, err: err.message }, '[Pipeline] Plan analysis failed');
         }
       }
 
       // Now fetch any available analysis
       const { rows: attachments } = await db.query(
         `SELECT analysis FROM attachments 
-         WHERE (session_id = $1 OR job_id = $2) AND analysis IS NOT NULL 
+         WHERE (session_id = $1 OR job_id = $2) AND analysis IS NOT NULL AND deleted_at IS NULL
          LIMIT 1`,
         [sessionId, jobId]
       );
@@ -167,14 +173,30 @@ async function processSession(sessionId) {
       await notifyDiscrepancies(sessionId, discrepancies);
     }
 
+    // --- Step 12: OpenSite integration ---
+    try {
+      const { fireWebhook, syncToJobTracker } = require('./opensite');
+      await fireWebhook('session.complete', {
+        session_id: sessionId,
+        job_id: jobId,
+        summary: summaryJson,
+        has_discrepancies: discrepancies?.items?.length > 0,
+      });
+      if (jobId) {
+        await syncToJobTracker(jobId);
+      }
+    } catch (err) {
+      sessionLogger.info(`[Pipeline] OpenSite sync skipped: ${err.message}`);
+    }
+
     // Done!
     await updateStatus(sessionId, 'complete');
-    console.log(`\n[Pipeline] ✅ Session ${sessionId} complete!\n`);
+    sessionLogger.info('\n[Pipeline] ✅ Session complete!\n');
 
     return { sessionId, jobId, summary: summaryJson };
 
   } catch (err) {
-    console.error(`[Pipeline] ❌ Error processing session ${sessionId}:`, err);
+    sessionLogger.error({ err }, '[Pipeline] ❌ Error processing session');
     await db.query(
       `UPDATE sessions SET status = 'error', error_message = $1 WHERE id = $2`,
       [err.message, sessionId]
@@ -189,7 +211,7 @@ async function processSession(sessionId) {
  */
 async function updateStatus(sessionId, status) {
   await db.query('UPDATE sessions SET status = $1 WHERE id = $2', [status, sessionId]);
-  console.log(`[Pipeline] Status → ${status}`);
+  logger.info({ sessionId, status }, '[Pipeline] Status updated');
 }
 
 /**
@@ -204,7 +226,7 @@ async function resolveJob(voiceTag, summaryJson = null) {
   if (subdivision && lot) {
     const { rows } = await db.query(
       `SELECT id FROM jobs 
-       WHERE LOWER(subdivision) = LOWER($1) AND LOWER(lot_number) = LOWER($2)
+       WHERE LOWER(subdivision) = LOWER($1) AND LOWER(lot_number) = LOWER($2) AND deleted_at IS NULL
        LIMIT 1`,
       [subdivision, lot]
     );
@@ -218,7 +240,7 @@ async function resolveJob(voiceTag, summaryJson = null) {
        VALUES ($1, $2, $3, $4) RETURNING id`,
       [builder, subdivision, lot, voiceTag ? `Voice tagged: ${voiceTag}` : null]
     );
-    console.log(`[Pipeline] Created job #${rows[0].id}`);
+    logger.info({ jobId: rows[0].id }, '[Pipeline] Created job');
     return rows[0].id;
   }
 

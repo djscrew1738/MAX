@@ -1,29 +1,31 @@
-FROM node:20-alpine AS base
+FROM node:20-alpine
 
-# Install dependencies for file processing
-RUN apk add --no-cache curl ffmpeg poppler-utils postgresql-client
+# Security: Create non-root user
+RUN addgroup -g 1000 -S node && \
+    adduser -u 1000 -S node -G node
 
 WORKDIR /app
+
+# Install dependencies for file processing
+RUN apk add --no-cache curl ffmpeg poppler-utils
 
 # Copy package files
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci --production && npm cache clean --force
-
-# Production stage
-FROM base AS production
-
-WORKDIR /app
-
-# Copy dependencies from base
-COPY --from=base /app/node_modules ./node_modules
+RUN npm ci --production && \
+    # Clean up npm cache
+    npm cache clean --force
 
 # Copy application code
 COPY . .
 
-# Create uploads directory
-RUN mkdir -p /app/uploads /app/backups /app/data
+# Create uploads directory and set permissions
+RUN mkdir -p /app/uploads && \
+    chown -R node:node /app
+
+# Switch to non-root user
+USER node
 
 # Expose port
 EXPOSE 3210
@@ -32,21 +34,5 @@ EXPOSE 3210
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:3210/health || exit 1
 
-# Run migrations and start
-CMD ["sh", "-c", "node src/db/migrate.js up && node src/index.js"]
-
-# Development stage
-FROM base AS development
-
-WORKDIR /app
-
-# Install all dependencies (including dev)
-RUN npm ci
-
-COPY . .
-
-RUN mkdir -p /app/uploads /app/backups /app/data
-
-EXPOSE 3210
-
-CMD ["npm", "run", "dev"]
+# Start application
+CMD ["node", "src/index.js"]

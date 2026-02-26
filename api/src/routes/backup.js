@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../db');
 const config = require('../config');
+const { logger } = require('../utils/logger');
 
 const router = express.Router();
 const execAsync = promisify(exec);
@@ -61,7 +62,7 @@ router.post('/create', async (req, res, next) => {
     const username = dbUrl.username;
     const password = dbUrl.password;
     
-    console.log(`[Backup] Creating backup: ${filename}`);
+    logger.info({ filename }, '[Backup] Creating backup');
     
     // Use pg_dump to create backup
     const env = { ...process.env, PGPASSWORD: password };
@@ -80,7 +81,7 @@ router.post('/create', async (req, res, next) => {
       message: 'Backup created successfully',
     });
   } catch (err) {
-    console.error('[Backup] Error:', err);
+    logger.error({ err }, '[Backup] Error creating backup');
     next(err);
   }
 });
@@ -111,7 +112,7 @@ router.post('/restore', async (req, res, next) => {
     const username = dbUrl.username;
     const password = dbUrl.password;
     
-    console.log(`[Backup] Restoring from: ${filename}`);
+    logger.info({ filename }, '[Backup] Restoring from backup');
     
     // Use gunzip and psql to restore
     const env = { ...process.env, PGPASSWORD: password };
@@ -132,7 +133,7 @@ router.post('/restore', async (req, res, next) => {
       message: 'Database restored successfully',
     });
   } catch (err) {
-    console.error('[Backup] Restore error:', err);
+    logger.error({ err }, '[Backup] Restore error');
     next(err);
   }
 });
@@ -205,6 +206,8 @@ router.post('/cleanup', async (req, res, next) => {
       deletedCount++;
       freedSpace += stats.size;
     }
+    
+    logger.info({ deleted: deletedCount, freedSpace }, '[Backup] Cleanup complete');
     
     res.json({
       success: true,

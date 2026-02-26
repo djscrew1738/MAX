@@ -1,12 +1,11 @@
 {
   "name": "max-api",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "Max - AI Field Assistant for CTL Plumbing",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "init-db": "node src/db/init.js"
+    "dev": "node --watch src/index.js"
   },
   "dependencies": {
     "express": "^4.21.0",
@@ -19,10 +18,12 @@
     "uuid": "^10.0.0",
     "form-data": "^4.0.0",
     "node-fetch": "^2.7.0",
-    "compression": "^1.7.4",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "zod": "^3.23.0",
+    "express-rate-limit": "^7.3.0",
     "helmet": "^7.1.0",
-    "express-rate-limit": "^7.1.0",
-    "morgan": "^1.10.0",
-    "ws": "^8.14.0"
+    "clamscan": "^2.4.0",
+    "ws": "^8.18.0"
   }
 }
