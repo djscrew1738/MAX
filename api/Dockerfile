@@ -1,8 +1,7 @@
 FROM node:20-alpine
 
-# Security: Create non-root user
-RUN addgroup -g 1000 -S node && \
-    adduser -u 1000 -S node -G node
+# Note: node:20-alpine already has a 'node' user (uid=1000)
+# We just need to ensure proper permissions
 
 WORKDIR /app
 
@@ -14,7 +13,6 @@ COPY package*.json ./
 
 # Install dependencies
 RUN npm ci --production && \
-    # Clean up npm cache
     npm cache clean --force
 
 # Copy application code
@@ -24,7 +22,7 @@ COPY . .
 RUN mkdir -p /app/uploads && \
     chown -R node:node /app
 
-# Switch to non-root user
+# Switch to non-root user (node user already exists)
 USER node
 
 # Expose port
