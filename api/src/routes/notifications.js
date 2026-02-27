@@ -1,33 +1,46 @@
 const express = require('express');
-const { getUnread, getCounts, markRead, markAllRead } = require('../services/notifications');
+const db = require('../db');
+const { getCounts, markRead, markAllRead } = require('../services/notifications');
 const { logger } = require('../utils/logger');
 
 const router = express.Router();
 
 /**
  * GET /api/notifications
- * Get notifications (optionally all, not just unread)
+ * Get notifications with pagination.
+ *
+ * Query params:
+ *   unread=false  — include read notifications (default: unread only)
+ *   limit         — max results per page (1–100, default 20)
+ *   offset        — skip N results (default 0)
  */
 router.get('/', async (req, res) => {
   try {
-    const { unread } = req.query;
-    
-    // Default to only unread unless ?unread=false
-    const onlyUnread = unread !== 'false';
-    
-    if (onlyUnread) {
-      const notifications = await getUnread();
-      return res.json({ notifications, unread: notifications.length });
-    } else {
-      // Get all recent notifications
-      const db = require('../db');
-      const { rows: notifications } = await db.query(
-        `SELECT * FROM notifications 
-         ORDER BY created_at DESC 
-         LIMIT 100`
-      );
-      return res.json({ notifications, total: notifications.length });
-    }
+    const onlyUnread = req.query.unread !== 'false';
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 20), 100);
+    const offset = Math.max(0, parseInt(req.query.offset) || 0);
+
+    const whereClause = onlyUnread ? 'WHERE read = FALSE' : '';
+
+    const [{ rows: notifications }, { rows: [countRow] }] = await Promise.all([
+      db.query(
+        `SELECT * FROM notifications ${whereClause}
+         ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+      db.query(
+        `SELECT COUNT(*) AS total FROM notifications ${whereClause}`
+      ),
+    ]);
+
+    const total = parseInt(countRow.total);
+    return res.json({
+      notifications,
+      total,
+      limit,
+      offset,
+      has_more: offset + limit < total,
+    });
   } catch (err) {
     logger.error({ err }, '[Notifications] Error getting notifications');
     res.status(500).json({ error: err.message });

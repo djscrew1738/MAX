@@ -73,6 +73,15 @@ const chatLimiter = rateLimit({
 
 app.use(standardLimiter);
 
+// Tight rate limiter for unauthenticated public endpoints (/health, /status)
+const publicEndpointLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Too many requests' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // --- API Key Auth for /api routes ---
 app.use('/api', authenticateApiKey);
 
@@ -107,7 +116,7 @@ app.post('/api/digest', async (req, res) => {
 });
 
 // --- Health check (deep check with dependencies) ---
-app.get('/health', async (req, res) => {
+app.get('/health', publicEndpointLimiter, async (req, res) => {
   // Check database
   const dbHealth = await db.healthCheck();
 
@@ -147,7 +156,7 @@ app.get('/health', async (req, res) => {
 });
 
 // --- Simple status endpoint (no auth) ---
-app.get('/status', async (req, res) => {
+app.get('/status', publicEndpointLimiter, async (req, res) => {
   try {
     const { rows: [counts] } = await db.query(`
       SELECT 

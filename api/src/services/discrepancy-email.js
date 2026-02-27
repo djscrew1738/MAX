@@ -16,14 +16,26 @@ function getTransporter() {
   return transporter;
 }
 
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 /**
  * Send discrepancy alert email
  */
 async function sendDiscrepancyAlert(discrepancies, sessionInfo = {}) {
   if (!getTransporter() || !config.email.to) return false;
 
-  const jobLabel = [sessionInfo.builder, sessionInfo.subdivision, sessionInfo.lot]
-    .filter(Boolean).join(' — ') || 'Unknown Job';
+  const jobLabel = escapeHtml(
+    [sessionInfo.builder, sessionInfo.subdivision, sessionInfo.lot]
+      .filter(Boolean).join(' — ') || 'Unknown Job'
+  );
 
   const highItems = (discrepancies.items || []).filter(d => 
     d.severity === 'high' || d.severity === 'critical'
@@ -43,12 +55,12 @@ async function sendDiscrepancyAlert(discrepancies, sessionInfo = {}) {
       <tr style="border-bottom:1px solid #30363d">
         <td style="padding:12px 8px;vertical-align:top">${icon}</td>
         <td style="padding:12px 8px">
-          <div style="font-weight:600;color:#e6edf3">${d.description}</div>
-          ${d.plan_says ? `<div style="color:#8b949e;font-size:13px;margin-top:4px">📄 Plans: ${d.plan_says}</div>` : ''}
-          ${d.conversation_says ? `<div style="color:#8b949e;font-size:13px">🎙️ Discussed: ${d.conversation_says}</div>` : ''}
-          ${d.recommendation ? `<div style="color:#00d4ff;font-size:13px;margin-top:4px">→ ${d.recommendation}</div>` : ''}
+          <div style="font-weight:600;color:#e6edf3">${escapeHtml(d.description)}</div>
+          ${d.plan_says ? `<div style="color:#8b949e;font-size:13px;margin-top:4px">📄 Plans: ${escapeHtml(d.plan_says)}</div>` : ''}
+          ${d.conversation_says ? `<div style="color:#8b949e;font-size:13px">🎙️ Discussed: ${escapeHtml(d.conversation_says)}</div>` : ''}
+          ${d.recommendation ? `<div style="color:#00d4ff;font-size:13px;margin-top:4px">→ ${escapeHtml(d.recommendation)}</div>` : ''}
         </td>
-        <td style="padding:12px 8px;color:${color};font-weight:600;text-transform:uppercase;font-size:12px">${d.severity}</td>
+        <td style="padding:12px 8px;color:${color};font-weight:600;text-transform:uppercase;font-size:12px">${escapeHtml(d.severity)}</td>
       </tr>`;
   }).join('');
 
@@ -82,7 +94,7 @@ async function sendDiscrepancyAlert(discrepancies, sessionInfo = {}) {
     ${discrepancies.overall_recommendation ? `
     <div style="background:#1c2333;border-left:3px solid #00d4ff;padding:12px 16px;margin-bottom:20px;border-radius:0 8px 8px 0">
       <div style="color:#00d4ff;font-size:12px;font-weight:600;margin-bottom:4px">RECOMMENDATION</div>
-      <div style="color:#e6edf3">${discrepancies.overall_recommendation}</div>
+      <div style="color:#e6edf3">${escapeHtml(discrepancies.overall_recommendation)}</div>
     </div>
     ` : ''}
 
@@ -102,7 +114,7 @@ async function sendDiscrepancyAlert(discrepancies, sessionInfo = {}) {
     ${(discrepancies.matches || []).length > 0 ? `
     <div style="margin-top:20px;padding-top:16px;border-top:1px solid #30363d">
       <div style="color:#00ff88;font-size:12px;font-weight:600;margin-bottom:8px">✅ MATCHES</div>
-      ${discrepancies.matches.map(m => `<div style="color:#8b949e;font-size:13px;margin-bottom:4px">• ${m}</div>`).join('')}
+      ${discrepancies.matches.map(m => `<div style="color:#8b949e;font-size:13px;margin-bottom:4px">• ${escapeHtml(m)}</div>`).join('')}
     </div>
     ` : ''}
   </div>

@@ -27,14 +27,30 @@ async function processSession(sessionId) {
   sessionLogger.info('='.repeat(50) + '\n');
 
   try {
-    // Get session from DB
-    const { rows: [session] } = await db.query(
-      'SELECT * FROM sessions WHERE id = $1 AND deleted_at IS NULL', [sessionId]
-    );
-    if (!session) throw new Error(`Session ${sessionId} not found`);
+    // Atomically claim the session by setting status to 'transcribing'.
+    // FOR UPDATE SKIP LOCKED means a concurrent invocation for the same session
+    // returns immediately with no row instead of waiting, preventing double-processing.
+    const session = await db.transaction(async (client) => {
+      const { rows: [row] } = await client.query(
+        `SELECT * FROM sessions
+         WHERE id = $1 AND deleted_at IS NULL AND status = 'uploaded'
+         FOR UPDATE SKIP LOCKED`,
+        [sessionId]
+      );
+      if (!row) return null;
+      await client.query(
+        `UPDATE sessions SET status = 'transcribing' WHERE id = $1`,
+        [sessionId]
+      );
+      return row;
+    });
 
-    // --- Step 1: Transcribe ---
-    await updateStatus(sessionId, 'transcribing');
+    if (!session) {
+      sessionLogger.warn('[Pipeline] Session not found, deleted, or already being processed — skipping');
+      return null;
+    }
+
+    // --- Step 1: Transcribe (status already set to transcribing above) ---
     const { text: rawTranscript, segments, duration } = await transcribe(session.audio_path);
 
     // --- Step 2: Strip commands ---

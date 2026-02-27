@@ -85,7 +85,6 @@ router.get('/', async (req, res, next) => {
     res.json({
       backups: files,
       count: files.length,
-      backup_dir: BACKUP_DIR,
     });
   } catch (err) {
     next(err);

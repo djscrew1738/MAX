@@ -11,32 +11,46 @@ const { processSession } = require('../services/pipeline');
 
 const router = express.Router();
 
-// Initialize ClamAV scanner (lazy init)
+// ClamAV scanner state — retried every 5 minutes on failure
 let clamScanner = null;
+let clamLastError = null;
+let clamLastAttempt = 0;
+const CLAM_RETRY_MS = 5 * 60 * 1000; // retry init every 5 minutes
 
 async function getClamScanner() {
   if (!config.clamav.enabled) {
     return null;
   }
-  
-  if (!clamScanner) {
-    try {
-      clamScanner = await new NodeClam().init({
-        clamdscan: {
-          host: config.clamav.host,
-          port: config.clamav.port,
-          timeout: 60000,
-        },
-        preference: 'clamdscan',
-      });
-      logger.info('[ClamAV] Scanner initialized');
-    } catch (err) {
-      logger.error({ err }, '[ClamAV] Failed to initialize scanner');
-      return null;
-    }
+
+  if (clamScanner) {
+    return clamScanner;
   }
-  
-  return clamScanner;
+
+  // Back-off: don't hammer ClamAV if it keeps failing
+  const now = Date.now();
+  if (clamLastError && now - clamLastAttempt < CLAM_RETRY_MS) {
+    throw new Error(`ClamAV unavailable (last error: ${clamLastError})`);
+  }
+
+  clamLastAttempt = now;
+  try {
+    clamScanner = await new NodeClam().init({
+      clamdscan: {
+        host: config.clamav.host,
+        port: config.clamav.port,
+        timeout: 60000,
+      },
+      preference: 'clamdscan',
+    });
+    clamLastError = null;
+    logger.info('[ClamAV] Scanner initialized');
+    return clamScanner;
+  } catch (err) {
+    clamLastError = err.message;
+    clamScanner = null; // allow retry next window
+    logger.error({ err }, '[ClamAV] Failed to initialize scanner');
+    throw err; // propagate so scanFile can fail closed
+  }
 }
 
 // --- Multer config ---
@@ -57,24 +71,31 @@ const upload = multer({
  * Scan file for viruses
  */
 async function scanFile(filePath) {
-  const scanner = await getClamScanner();
+  let scanner;
+  try {
+    scanner = await getClamScanner();
+  } catch (err) {
+    // ClamAV enabled but unavailable — fail closed (reject file)
+    logger.error({ err, filePath }, '[ClamAV] Scanner unavailable, rejecting file');
+    return { clean: false, error: err.message };
+  }
+
   if (!scanner) {
-    // If scanning is disabled or scanner failed, allow file through
+    // ClamAV explicitly disabled — allow through
     return { clean: true, skipped: true };
   }
-  
+
   try {
     const { isInfected, viruses } = await scanner.isInfected(filePath);
-    
     if (isInfected) {
       logger.warn({ viruses, filePath }, '[ClamAV] Virus detected');
       return { clean: false, viruses };
     }
-    
     return { clean: true };
   } catch (err) {
-    logger.error({ err, filePath }, '[ClamAV] Scan error');
-    // Fail closed - reject file if scan fails
+    // Runtime scan error — fail closed
+    clamScanner = null; // force re-init on next request
+    logger.error({ err, filePath }, '[ClamAV] Scan error, rejecting file');
     return { clean: false, error: err.message };
   }
 }
