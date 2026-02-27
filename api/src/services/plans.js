@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
-const fetch = require('node-fetch');
+const { execFileSync } = require('child_process');
 const config = require('../config');
 const db = require('../db');
 const { logger } = require('../utils/logger');
@@ -62,7 +61,8 @@ async function extractPdfText(filePath) {
   try {
     // Try pdftotext first (best for text-based PDFs)
     const outputPath = filePath.replace(/\.pdf$/i, '.txt');
-    execSync(`pdftotext -layout "${filePath}" "${outputPath}"`, { timeout: 30000 });
+    // Use execFileSync with an args array — never interpolate paths into a shell string
+    execFileSync('pdftotext', ['-layout', filePath, outputPath], { timeout: 30000 });
     
     if (fs.existsSync(outputPath)) {
       const text = fs.readFileSync(outputPath, 'utf-8');
@@ -94,9 +94,10 @@ async function ocrPdf(filePath) {
   fs.mkdirSync(tmpDir, { recursive: true });
 
   try {
-    // Convert PDF pages to images
-    execSync(
-      `pdftoppm -jpeg -r 200 -l 5 "${filePath}" "${tmpDir}/page"`,
+    // Convert PDF pages to images (args as array — no shell injection)
+    execFileSync(
+      'pdftoppm',
+      ['-jpeg', '-r', '200', '-l', '5', filePath, path.join(tmpDir, 'page')],
       { timeout: 60000 }
     );
 

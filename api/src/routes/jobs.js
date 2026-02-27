@@ -62,39 +62,42 @@ router.get('/:id', async (req, res) => {
 
 /**
  * DELETE /api/jobs/:id
- * Soft delete a job (and associated sessions)
+ * Soft delete a job and all associated records atomically
  */
 router.delete('/:id', async (req, res) => {
   try {
-    // Soft delete the job
-    const { rows: [job] } = await db.query(
-      `UPDATE jobs SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
-      [req.params.id]
-    );
-    
+    const jobId = req.params.id;
+
+    const job = await db.transaction(async (client) => {
+      // Soft delete the job first — serves as existence check
+      const { rows: [deleted] } = await client.query(
+        `UPDATE jobs SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+        [jobId]
+      );
+      if (!deleted) return null;
+
+      // Cascade soft-deletes atomically
+      await client.query(
+        `UPDATE sessions SET deleted_at = NOW() WHERE job_id = $1 AND deleted_at IS NULL`,
+        [jobId]
+      );
+      await client.query(
+        `UPDATE action_items SET deleted_at = NOW() WHERE job_id = $1 AND deleted_at IS NULL`,
+        [jobId]
+      );
+      await client.query(
+        `UPDATE attachments SET deleted_at = NOW() WHERE job_id = $1 AND deleted_at IS NULL`,
+        [jobId]
+      );
+
+      return deleted;
+    });
+
     if (!job) {
       return res.status(404).json({ error: 'Job not found' });
     }
-    
-    // Soft delete associated sessions (cascade will handle chunks)
-    await db.query(
-      `UPDATE sessions SET deleted_at = NOW() WHERE job_id = $1 AND deleted_at IS NULL`,
-      [req.params.id]
-    );
-    
-    // Soft delete associated action items
-    await db.query(
-      `UPDATE action_items SET deleted_at = NOW() WHERE job_id = $1 AND deleted_at IS NULL`,
-      [req.params.id]
-    );
-    
-    // Soft delete associated attachments
-    await db.query(
-      `UPDATE attachments SET deleted_at = NOW() WHERE job_id = $1 AND deleted_at IS NULL`,
-      [req.params.id]
-    );
 
-    logger.info({ jobId: req.params.id }, '[Jobs] Job soft deleted');
+    logger.info({ jobId }, '[Jobs] Job soft deleted');
     res.json({ success: true, message: 'Job deleted' });
   } catch (err) {
     logger.error({ err, jobId: req.params.id }, '[Jobs] Error deleting job');
@@ -210,18 +213,15 @@ router.post('/sessions/:id/reprocess', async (req, res) => {
   try {
     const { processSession } = require('../services/pipeline');
     
-    // Reset session status
-    await db.query(
-      `UPDATE sessions SET status = 'uploaded', error_message = NULL WHERE id = $1 AND deleted_at IS NULL`,
-      [req.params.id]
-    );
-
-    // Clear old chunks for this session
-    await db.query('DELETE FROM chunks WHERE session_id = $1', [req.params.id]);
-    await db.query(
-      'DELETE FROM action_items WHERE session_id = $1',
-      [req.params.id]
-    );
+    // Reset session status and clear stale data atomically
+    await db.transaction(async (client) => {
+      await client.query(
+        `UPDATE sessions SET status = 'uploaded', error_message = NULL WHERE id = $1 AND deleted_at IS NULL`,
+        [req.params.id]
+      );
+      await client.query('DELETE FROM chunks WHERE session_id = $1', [req.params.id]);
+      await client.query('DELETE FROM action_items WHERE session_id = $1', [req.params.id]);
+    });
 
     // Reprocess
     processSession(parseInt(req.params.id)).catch(err => {

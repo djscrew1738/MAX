@@ -1,5 +1,4 @@
 const express = require('express');
-const fetch = require('node-fetch');
 const db = require('../db');
 const config = require('../config');
 const { logger } = require('../utils/logger');
@@ -73,13 +72,13 @@ router.post('/', async (req, res) => {
       { role: 'system', content: CHAT_SYSTEM_PROMPT },
     ];
 
-    // Add conversation history (last 10 turns)
+    // Add conversation history (last 10 turns, validated roles only)
     const recentHistory = history.slice(-10);
     for (const msg of recentHistory) {
-      // Sanitize history to prevent injection
-      messages.push({ 
-        role: msg.role, 
-        content: sanitizeForLLM(msg.content).substring(0, 5000) 
+      if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+      messages.push({
+        role: msg.role,
+        content: sanitizeForLLM(msg.content).substring(0, 5000),
       });
     }
 

@@ -58,21 +58,31 @@ function buildSubject(json, session) {
   return `🔨 ${parts.join(' — ')}`;
 }
 
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function buildHtmlEmail(summaryText, json, session) {
   const actionItems = (json.action_items || [])
     .map(item => {
       const icon = item.priority === 'critical' ? '🔴' : item.priority === 'high' ? '🟡' : '⬜';
-      const due = item.due ? ` <span style="color:#888">(by ${item.due})</span>` : '';
-      return `<tr><td style="padding:4px 8px">${icon}</td><td style="padding:4px 8px">${item.description}${due}</td></tr>`;
+      const due = item.due ? ` <span style="color:#888">(by ${escapeHtml(item.due)})</span>` : '';
+      return `<tr><td style="padding:4px 8px">${icon}</td><td style="padding:4px 8px">${escapeHtml(item.description)}${due}</td></tr>`;
     })
     .join('');
 
   const decisions = (json.key_decisions || [])
-    .map(d => `<li style="margin-bottom:6px">${d}</li>`)
+    .map(d => `<li style="margin-bottom:6px">${escapeHtml(d)}</li>`)
     .join('');
 
   const flags = (json.flags || [])
-    .map(f => `<li style="margin-bottom:6px;color:#c0392b">⚠️ ${f}</li>`)
+    .map(f => `<li style="margin-bottom:6px;color:#c0392b">⚠️ ${escapeHtml(f)}</li>`)
     .join('');
 
   return `
@@ -87,10 +97,10 @@ function buildHtmlEmail(summaryText, json, session) {
   
   <div style="background:#fff;padding:20px;border:1px solid #e0e0e0">
     <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
-      ${json.builder_name ? `<tr><td style="padding:4px 0;color:#666;width:110px">Builder</td><td style="padding:4px 0;font-weight:600">${json.builder_name}</td></tr>` : ''}
-      ${json.subdivision ? `<tr><td style="padding:4px 0;color:#666">Subdivision</td><td style="padding:4px 0;font-weight:600">${json.subdivision}</td></tr>` : ''}
-      ${json.lot_number ? `<tr><td style="padding:4px 0;color:#666">Lot</td><td style="padding:4px 0;font-weight:600">${json.lot_number}</td></tr>` : ''}
-      ${json.phase ? `<tr><td style="padding:4px 0;color:#666">Phase</td><td style="padding:4px 0;font-weight:600">${json.phase}</td></tr>` : ''}
+      ${json.builder_name ? `<tr><td style="padding:4px 0;color:#666;width:110px">Builder</td><td style="padding:4px 0;font-weight:600">${escapeHtml(json.builder_name)}</td></tr>` : ''}
+      ${json.subdivision ? `<tr><td style="padding:4px 0;color:#666">Subdivision</td><td style="padding:4px 0;font-weight:600">${escapeHtml(json.subdivision)}</td></tr>` : ''}
+      ${json.lot_number ? `<tr><td style="padding:4px 0;color:#666">Lot</td><td style="padding:4px 0;font-weight:600">${escapeHtml(json.lot_number)}</td></tr>` : ''}
+      ${json.phase ? `<tr><td style="padding:4px 0;color:#666">Phase</td><td style="padding:4px 0;font-weight:600">${escapeHtml(json.phase)}</td></tr>` : ''}
       ${session.recorded_at ? `<tr><td style="padding:4px 0;color:#666">Date</td><td style="padding:4px 0">${new Date(session.recorded_at).toLocaleDateString()}</td></tr>` : ''}
       ${session.duration_secs ? `<tr><td style="padding:4px 0;color:#666">Duration</td><td style="padding:4px 0">${Math.round(session.duration_secs / 60)} min</td></tr>` : ''}
     </table>
@@ -102,9 +112,9 @@ function buildHtmlEmail(summaryText, json, session) {
 
     ${json.fixture_changes ? `
     <h2 style="font-size:16px;color:#1a1a2e;border-bottom:2px solid #f0f0f0;padding-bottom:8px">Fixture Changes</h2>
-    ${json.fixture_changes.mentioned_count ? `<p><strong>Count mentioned:</strong> ${json.fixture_changes.mentioned_count}</p>` : ''}
+    ${json.fixture_changes.mentioned_count ? `<p><strong>Count mentioned:</strong> ${escapeHtml(json.fixture_changes.mentioned_count)}</p>` : ''}
     <ul style="padding-left:20px">
-      ${(json.fixture_changes.details || []).map(d => `<li style="margin-bottom:4px">${d}</li>`).join('')}
+      ${(json.fixture_changes.details || []).map(d => `<li style="margin-bottom:4px">${escapeHtml(d)}</li>`).join('')}
     </ul>
     ` : ''}
 
@@ -120,7 +130,7 @@ function buildHtmlEmail(summaryText, json, session) {
 
     ${json.notes ? `
     <h2 style="font-size:16px;color:#1a1a2e;border-bottom:2px solid #f0f0f0;padding-bottom:8px">Notes</h2>
-    <p style="color:#444">${json.notes}</p>
+    <p style="color:#444">${escapeHtml(json.notes)}</p>
     ` : ''}
   </div>
   

@@ -40,6 +40,10 @@ const DiscrepancyItemSchema = z.object({
   type: z.enum(['fixture_count', 'location', 'spec', 'missing_from_plans', 'not_discussed', 'other']),
   description: z.string().min(1).max(1000),
   severity: z.enum(['low', 'medium', 'high', 'critical']),
+  // Fields used by discrepancy-email.js template
+  plan_says: z.string().max(500).optional().nullable(),
+  conversation_says: z.string().max(500).optional().nullable(),
+  recommendation: z.string().max(500).optional().nullable(),
 });
 
 // Discrepancies schema
@@ -47,6 +51,9 @@ const DiscrepanciesSchema = z.object({
   has_discrepancies: z.boolean(),
   items: z.array(DiscrepancyItemSchema).optional().nullable(),
   recommendation: z.string().max(500).optional().nullable(),
+  overall_recommendation: z.string().max(500).optional().nullable(),
+  match_score: z.number().min(0).max(100).optional().nullable(),
+  matches: z.array(z.string().max(500)).optional().nullable(),
 });
 
 // Plan analysis schema
@@ -105,7 +112,7 @@ const ChatMessageSchema = z.object({
   message: z.string().min(1).max(2000),
   job_id: z.number().int().positive().optional().nullable(),
   history: z.array(z.object({
-    role: z.enum(['user', 'assistant', 'system']),
+    role: z.enum(['user', 'assistant']),
     content: z.string().max(10000),
   })).max(50).optional(),
 });

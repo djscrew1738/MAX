@@ -15,7 +15,8 @@ router.get('/', async (req, res) => {
   const reqLogger = logger.child({ reqId: req.id });
   
   try {
-    const { q, type = 'all', job_id, limit = 20 } = req.query;
+    const { q, type = 'all', job_id } = req.query;
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 20), 50);
 
     if (!q) return res.status(400).json({ error: 'Query parameter "q" required' });
 
@@ -30,7 +31,7 @@ router.get('/', async (req, res) => {
     // --- Vector search (semantic) ---
     const vectorResults = await searchChunks(q, {
       jobId: job_id ? parseInt(job_id) : null,
-      limit: parseInt(limit),
+      limit,
     });
 
     results.vector_results = vectorResults.map(r => ({
@@ -71,7 +72,7 @@ router.get('/', async (req, res) => {
         ftsQuery += ` AND s.job_id = $${params.length}`;
       }
 
-      params.push(parseInt(limit));
+      params.push(limit);
       ftsQuery += ` ORDER BY rank DESC LIMIT $${params.length}`;
 
       const { rows } = await db.query(ftsQuery, params);
@@ -106,7 +107,8 @@ router.get('/', async (req, res) => {
         actionsQuery += ` AND ai.job_id = $${params.length}`;
       }
 
-      actionsQuery += ' ORDER BY ai.created_at DESC LIMIT 20';
+      params.push(limit);
+      actionsQuery += ` ORDER BY ai.created_at DESC LIMIT $${params.length}`;
 
       const { rows } = await db.query(actionsQuery, params);
       results.action_results = rows;

@@ -92,9 +92,13 @@ module.exports = {
   uploadDir: process.env.UPLOAD_DIR || './uploads',
   
   // API Key - NO FALLBACK in production
-  apiKey: process.env.NODE_ENV === 'production' 
+  apiKey: process.env.NODE_ENV === 'production'
     ? (process.env.MAX_API_KEY || (() => { throw new Error('MAX_API_KEY is required in production'); })())
     : (process.env.MAX_API_KEY || 'dev-key-change-in-production'),
+
+  // Admin Key for destructive operations (backup/restore).
+  // If not set, admin endpoints fall back to standard API key auth only.
+  adminKey: process.env.MAX_ADMIN_KEY || null,
   
   // CORS configuration
   allowedOrigins,

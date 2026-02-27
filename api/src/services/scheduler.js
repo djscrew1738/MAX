@@ -81,25 +81,34 @@ class Scheduler {
   }
 
   /**
-   * Register a scheduled task
+   * Register a scheduled task with overlap protection.
+   * If a previous run is still in progress the new tick is skipped.
    */
   schedule(name, intervalMs, fn) {
     this.tasks.push(name);
-    
-    // Run once after a short delay on startup
-    setTimeout(async () => {
-      try { await fn(); } catch (err) {
-        logger.error({ task: name, err: err.message }, '[Scheduler] Initial run failed');
+
+    let isRunning = false;
+
+    const safeRun = async () => {
+      if (isRunning) {
+        logger.warn({ task: name }, '[Scheduler] Task still running, skipping tick');
+        return;
       }
-    }, 30000); // 30s after startup
+      isRunning = true;
+      try {
+        await fn();
+      } catch (err) {
+        logger.error({ task: name, err: err.message }, '[Scheduler] Task failed');
+      } finally {
+        isRunning = false;
+      }
+    };
+
+    // Run once after a short delay on startup
+    setTimeout(safeRun, 30000);
 
     // Then run on interval
-    const interval = setInterval(async () => {
-      try { await fn(); } catch (err) {
-        logger.error({ task: name, err: err.message }, '[Scheduler] Task failed');
-      }
-    }, intervalMs);
-
+    const interval = setInterval(safeRun, intervalMs);
     this.intervals.push(interval);
   }
 

@@ -1,7 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const FormData = require('form-data');
-const fetch = require('node-fetch');
 const config = require('../config');
 const { logger } = require('../utils/logger');
 
@@ -12,8 +10,11 @@ const { logger } = require('../utils/logger');
 async function transcribe(audioFilePath) {
   logger.info({ file: audioFilePath }, '[Whisper] Transcribing');
   
+  // Read file into a Blob so native FormData can attach it with a filename
+  const fileBuffer = await fs.promises.readFile(audioFilePath);
+  const blob = new Blob([fileBuffer]);
   const form = new FormData();
-  form.append('file', fs.createReadStream(audioFilePath));
+  form.append('file', blob, path.basename(audioFilePath));
   form.append('model', 'base.en');
   form.append('response_format', 'verbose_json');
   form.append('language', 'en');
@@ -25,7 +26,6 @@ async function transcribe(audioFilePath) {
     const response = await fetch(`${config.whisper.url}/v1/audio/transcriptions`, {
       method: 'POST',
       body: form,
-      headers: form.getHeaders(),
       signal: controller.signal,
     });
 

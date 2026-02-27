@@ -91,6 +91,8 @@ app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/search', require('./routes/search'));
 app.use('/api/opensite', require('./routes/opensite'));
+app.use('/api/metrics', require('./routes/metrics'));
+app.use('/api/backup', require('./routes/backup'));
 
 // --- Digest endpoint (manual trigger) ---
 app.post('/api/digest', async (req, res) => {
@@ -106,27 +108,25 @@ app.post('/api/digest', async (req, res) => {
 
 // --- Health check (deep check with dependencies) ---
 app.get('/health', async (req, res) => {
-  const fetch = require('node-fetch');
-  
   // Check database
   const dbHealth = await db.healthCheck();
-  
-  // Check Whisper
+
+  // Check Whisper (5s timeout via AbortSignal)
   let whisperHealth = false;
   try {
-    const whisperResponse = await fetch(`${config.whisper.url}/health`, { 
-      timeout: 5000 
+    const whisperResponse = await fetch(`${config.whisper.url}/health`, {
+      signal: AbortSignal.timeout(5000),
     });
     whisperHealth = whisperResponse.ok;
   } catch (err) {
     whisperHealth = false;
   }
-  
-  // Check Ollama
+
+  // Check Ollama (5s timeout via AbortSignal)
   let ollamaHealth = false;
   try {
-    const ollamaResponse = await fetch(`${config.ollama.url}/api/tags`, { 
-      timeout: 5000 
+    const ollamaResponse = await fetch(`${config.ollama.url}/api/tags`, {
+      signal: AbortSignal.timeout(5000),
     });
     ollamaHealth = ollamaResponse.ok;
   } catch (err) {
@@ -229,13 +229,22 @@ wss.on('connection', (ws, req) => {
   // Handle messages
   ws.on('message', (message) => {
     try {
+      // Reject oversized messages before parsing
+      if (message.length > 10240) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Message too large' }));
+        return;
+      }
+
       const data = JSON.parse(message);
-      
+
       if (data.type === 'ping') {
         ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
       } else if (data.type === 'subscribe') {
-        // Store subscribed job IDs on the ws object
-        ws.subscribedJobs = data.jobIds || [];
+        // Validate jobIds: must be a non-huge array of positive integers
+        const rawIds = Array.isArray(data.jobIds) ? data.jobIds : [];
+        ws.subscribedJobs = rawIds
+          .filter(id => Number.isInteger(id) && id > 0)
+          .slice(0, 100);
         ws.send(JSON.stringify({ type: 'subscribed', jobs: ws.subscribedJobs }));
       }
     } catch (err) {
