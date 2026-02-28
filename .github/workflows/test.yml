@@ -1,7 +1,32 @@
-name: Quick Test
-on: [push, workflow_dispatch]
+name: Tests
+on: [push, pull_request, workflow_dispatch]
+
 jobs:
-  test:
+  unit-tests:
+    name: API Unit Tests
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./api
     steps:
-      - run: echo "GitHub Actions are working!"
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test -- --forceExit
+
+      - name: Run tests with coverage
+        run: npm run test:coverage -- --forceExit
+        env:
+          NODE_ENV: test
+          MAX_API_KEY: test-api-key
+          DATABASE_URL: postgres://test:test@localhost:5432/test_max
+          POSTGRES_PASSWORD: test-password
