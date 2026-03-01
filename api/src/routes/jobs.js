@@ -10,19 +10,29 @@ const router = express.Router();
  */
 router.get('/', async (req, res) => {
   try {
-    const { rows } = await db.query(
-      `SELECT j.*, 
-        (SELECT COUNT(*) FROM sessions s WHERE s.job_id = j.id AND s.deleted_at IS NULL) as session_count,
-        (SELECT COUNT(*) FROM attachments a WHERE a.job_id = j.id AND a.deleted_at IS NULL) as attachment_count,
-        (SELECT COUNT(*) FROM action_items ai WHERE ai.job_id = j.id AND ai.completed = FALSE AND ai.deleted_at IS NULL) as open_items
-       FROM jobs j
-       WHERE j.deleted_at IS NULL
-       ORDER BY j.updated_at DESC`
-    );
-    res.json(rows);
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const page = Math.max(parseInt(req.query.page) || 0, 0);
+    const offset = page * limit;
+
+    const [{ rows }, { rows: [{ total }] }] = await Promise.all([
+      db.query(
+        `SELECT j.*,
+          (SELECT COUNT(*) FROM sessions s WHERE s.job_id = j.id AND s.deleted_at IS NULL) as session_count,
+          (SELECT COUNT(*) FROM attachments a WHERE a.job_id = j.id AND a.deleted_at IS NULL) as attachment_count,
+          (SELECT COUNT(*) FROM action_items ai WHERE ai.job_id = j.id AND ai.completed = FALSE AND ai.deleted_at IS NULL) as open_items
+         FROM jobs j
+         WHERE j.deleted_at IS NULL
+         ORDER BY j.updated_at DESC
+         LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+      db.query('SELECT COUNT(*) as total FROM jobs WHERE deleted_at IS NULL'),
+    ]);
+
+    res.json({ jobs: rows, total: parseInt(total), page, limit });
   } catch (err) {
     logger.error({ err }, '[Jobs] Error listing jobs');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -56,7 +66,7 @@ router.get('/:id', async (req, res) => {
     res.json({ ...job, sessions, attachments, action_items: actionItems });
   } catch (err) {
     logger.error({ err, jobId: req.params.id }, '[Jobs] Error getting job');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -98,7 +108,7 @@ router.delete('/:id', async (req, res) => {
     res.json({ success: true, message: 'Job deleted' });
   } catch (err) {
     logger.error({ err, jobId: req.params.id }, '[Jobs] Error deleting job');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -121,7 +131,7 @@ router.delete('/sessions/:id', async (req, res) => {
     res.json({ success: true, message: 'Session deleted' });
   } catch (err) {
     logger.error({ err, sessionId: req.params.id }, '[Jobs] Error deleting session');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -153,7 +163,7 @@ router.get('/sessions/:id', async (req, res) => {
     res.json({ ...session, attachments, action_items: actionItems });
   } catch (err) {
     logger.error({ err, sessionId: req.params.id }, '[Jobs] Error getting session');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -172,7 +182,7 @@ router.patch('/actions/:id', async (req, res) => {
     res.json(item);
   } catch (err) {
     logger.error({ err, actionId: req.params.id }, '[Jobs] Error updating action item');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -198,7 +208,7 @@ router.get('/:id/intel', async (req, res) => {
     res.json({ ...job, intel });
   } catch (err) {
     logger.error({ err, jobId: req.params.id }, '[Jobs] Error getting intelligence');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -231,7 +241,7 @@ router.post('/sessions/:id/reprocess', async (req, res) => {
     res.json({ success: true, message: 'Reprocessing started' });
   } catch (err) {
     logger.error({ err, sessionId: req.params.id }, '[Reprocess] Error');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -287,7 +297,7 @@ router.get('/dashboard/stats', async (req, res) => {
     });
   } catch (err) {
     logger.error({ err }, '[Jobs] Error getting dashboard stats');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

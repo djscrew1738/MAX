@@ -71,7 +71,8 @@ const chatLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.use(standardLimiter);
+// Rate limiting scoped to /api only — /health and /status are exempt
+app.use('/api', standardLimiter);
 
 // --- API Key Auth for /api routes ---
 app.use('/api', authenticateApiKey);
@@ -106,32 +107,28 @@ app.post('/api/digest', async (req, res) => {
 
 // --- Health check (deep check with dependencies) ---
 app.get('/health', async (req, res) => {
-  const fetch = require('node-fetch');
-  
   // Check database
   const dbHealth = await db.healthCheck();
-  
+
+  // Helper: fetch with a 5-second timeout using AbortController
+  async function fetchHealthy(url) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    try {
+      const r = await fetch(url, { signal: ac.signal });
+      return r.ok;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Check Whisper
-  let whisperHealth = false;
-  try {
-    const whisperResponse = await fetch(`${config.whisper.url}/health`, { 
-      timeout: 5000 
-    });
-    whisperHealth = whisperResponse.ok;
-  } catch (err) {
-    whisperHealth = false;
-  }
-  
+  const whisperHealth = await fetchHealthy(`${config.whisper.url}/health`);
+
   // Check Ollama
-  let ollamaHealth = false;
-  try {
-    const ollamaResponse = await fetch(`${config.ollama.url}/api/tags`, { 
-      timeout: 5000 
-    });
-    ollamaHealth = ollamaResponse.ok;
-  } catch (err) {
-    ollamaHealth = false;
-  }
+  const ollamaHealth = await fetchHealthy(`${config.ollama.url}/api/tags`);
   
   const allHealthy = dbHealth.healthy && whisperHealth && ollamaHealth;
   
@@ -176,10 +173,13 @@ const wss = new WebSocket.Server({
   server,
   path: '/ws',
   verifyClient: (info, done) => {
-    // Verify API key from query string during handshake
+    // Prefer Authorization: Bearer <token> header; fall back to ?token= query param
+    const authHeader = info.req.headers['authorization'];
     const url = new URL(info.req.url, `http://${info.req.headers.host}`);
-    const token = url.searchParams.get('token');
-    
+    const token = authHeader?.startsWith('Bearer ')
+      ? authHeader.slice(7)
+      : url.searchParams.get('token');
+
     if (!token) {
       logger.warn('[WebSocket] Connection rejected: no token');
       return done(false, 401, 'Authentication required');

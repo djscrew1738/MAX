@@ -1,4 +1,3 @@
-const fetch = require('node-fetch');
 const config = require('../config');
 const db = require('../db');
 const { logger } = require('../utils/logger');
@@ -70,20 +69,26 @@ async function embedSession(sessionId, jobId, transcript, segments = []) {
   let stored = 0;
   let failed = 0;
 
-  for (const chunk of chunks) {
-    try {
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(async (chunk) => {
       const embedding = await generateEmbedding(chunk);
       const vectorStr = `[${embedding.join(',')}]`;
-
       await db.query(
         `INSERT INTO chunks (session_id, job_id, chunk_type, content, embedding)
          VALUES ($1, $2, 'transcript', $3, $4::vector)`,
         [sessionId, jobId, chunk, vectorStr]
       );
-      stored++;
-    } catch (err) {
-      failed++;
-      logger.error({ err: err.message, sessionId, chunkIndex: stored + failed }, '[Embeddings] Failed to embed chunk');
+    }));
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        stored++;
+      } else {
+        failed++;
+        logger.error({ err: result.reason?.message, sessionId }, '[Embeddings] Failed to embed chunk');
+      }
     }
   }
 
