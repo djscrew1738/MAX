@@ -12,8 +12,8 @@ android {
         applicationId = "com.ctlplumbing.max"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "2.1.0"
 
         // Server configuration - TAILSCALE SETUP
         // Update this to your Tailscale IP and external port
