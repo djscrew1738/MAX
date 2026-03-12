@@ -91,6 +91,8 @@ app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/search', require('./routes/search'));
 app.use('/api/opensite', require('./routes/opensite'));
+app.use('/api/openclaw', require('./routes/openclaw'));
+app.use('/api/clawdtalk', require('./routes/clawdtalk'));
 
 // --- Digest endpoint (manual trigger) ---
 app.post('/api/digest', async (req, res) => {
@@ -125,16 +127,24 @@ app.get('/health', async (req, res) => {
   // Check Ollama
   let ollamaHealth = false;
   try {
-    const ollamaResponse = await fetch(`${config.ollama.url}/api/tags`, { 
-      timeout: 5000 
+    const ollamaResponse = await fetch(`${config.ollama.url}/api/tags`, {
+      timeout: 5000
     });
     ollamaHealth = ollamaResponse.ok;
   } catch (err) {
     ollamaHealth = false;
   }
-  
+
+  // Check OpenClaw (optional — does not affect overall health status)
+  const openclawService = require('./services/openclaw');
+  const openclawHealth = await openclawService.checkHealth();
+
+  // Check ClawdTalk (optional — does not affect overall health status)
+  const clawdtalkService = require('./services/clawdtalk');
+  const clawdtalkStatus = clawdtalkService.getStatus();
+
   const allHealthy = dbHealth.healthy && whisperHealth && ollamaHealth;
-  
+
   res.status(allHealthy ? 200 : 503).json({
     status: allHealthy ? 'healthy' : 'degraded',
     timestamp: new Date().toISOString(),
@@ -142,6 +152,12 @@ app.get('/health', async (req, res) => {
       db: dbHealth.healthy ? { status: 'ok', latency: dbHealth.latency } : { status: 'error', error: dbHealth.error },
       whisper: whisperHealth ? { status: 'ok' } : { status: 'error' },
       ollama: ollamaHealth ? { status: 'ok' } : { status: 'error' },
+      openclaw: openclawHealth.connected
+        ? { status: 'ok' }
+        : { status: openclawHealth.reason === 'not_configured' ? 'not_configured' : 'error', reason: openclawHealth.reason },
+      clawdtalk: clawdtalkStatus.connected
+        ? { status: 'ok', active_calls: clawdtalkStatus.active_calls }
+        : { status: clawdtalkStatus.reason === 'not_configured' ? 'not_configured' : 'error', reason: clawdtalkStatus.reason || clawdtalkStatus.state },
     },
   });
 });
@@ -295,6 +311,10 @@ async function start() {
       // Start scheduler for weekly digests, cleanup, retries
       const scheduler = require('./services/scheduler');
       scheduler.start();
+
+      // Start ClawdTalk persistent voice connection
+      const clawdtalkSvc = require('./services/clawdtalk');
+      clawdtalkSvc.connect();
     });
     
   } catch (err) {
@@ -304,35 +324,31 @@ async function start() {
 }
 
 // Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  
-  server.close(() => {
-    logger.info('HTTP server closed');
-  });
-  
-  wss.close(() => {
-    logger.info('WebSocket server closed');
-  });
-  
-  await db.close();
-  process.exit(0);
-});
+async function gracefulShutdown(signal) {
+  logger.info(`${signal} received, shutting down gracefully`);
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  
+  // Stop ClawdTalk connection first
+  try {
+    const clawdtalkSvc = require('./services/clawdtalk');
+    clawdtalkSvc.disconnect();
+  } catch (err) {
+    // Non-fatal
+  }
+
   server.close(() => {
     logger.info('HTTP server closed');
   });
-  
+
   wss.close(() => {
     logger.info('WebSocket server closed');
   });
-  
+
   await db.close();
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {

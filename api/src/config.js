@@ -148,7 +148,23 @@ module.exports = {
     apiKey: process.env.OPENSITE_API_KEY || '',
     webhookUrl: process.env.OPENSITE_WEBHOOK_URL || '',
   },
-  
+
+  openclaw: {
+    url: process.env.OPENCLAW_URL || '',
+    apiKey: process.env.OPENCLAW_API_KEY || '',
+    agentId: process.env.OPENCLAW_AGENT_ID || '',
+    webhookSecret: process.env.OPENCLAW_WEBHOOK_SECRET || '',
+    timeout: parseInt(process.env.OPENCLAW_TIMEOUT || '15000'),
+  },
+
+  clawdtalk: {
+    wsUrl: process.env.CLAWDTALK_WS_URL || 'wss://ws.clawdtalk.com',
+    apiUrl: process.env.CLAWDTALK_API_URL || 'https://api.clawdtalk.com',
+    apiKey: process.env.CLAWDTALK_API_KEY || '',
+    phoneNumber: process.env.CLAWDTALK_PHONE_NUMBER || '',
+    reconnectDelay: parseInt(process.env.CLAWDTALK_RECONNECT_DELAY || '5000'),
+  },
+
   // Logging
   logLevel: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
 };

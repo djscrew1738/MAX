@@ -189,6 +189,20 @@ async function processSession(sessionId) {
       sessionLogger.info(`[Pipeline] OpenSite sync skipped: ${err.message}`);
     }
 
+    // --- Step 13: OpenClaw integration ---
+    try {
+      const openclaw = require('./openclaw');
+      await openclaw.pushSessionSummary(sessionId, summaryJson, discrepancies);
+      if (discrepancies?.items?.length > 0) {
+        await openclaw.alertDiscrepancies(sessionId, discrepancies);
+      }
+      if (jobId) {
+        await openclaw.pushActionItems(jobId);
+      }
+    } catch (err) {
+      sessionLogger.info(`[Pipeline] OpenClaw sync skipped: ${err.message}`);
+    }
+
     // Done!
     await updateStatus(sessionId, 'complete');
     sessionLogger.info('\n[Pipeline] ✅ Session complete!\n');
